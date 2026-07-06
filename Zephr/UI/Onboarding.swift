@@ -279,6 +279,14 @@ private struct OnboardingView: View {
                 Button("Open System Settings") { controller.requestPermission() }
                     .keyboardShortcut(.defaultAction)
             }
+            if !model.permissionGranted {
+                Button("Checked the box already? Reset the stale grant…") {
+                    PermissionGate.resetStaleGrant()
+                    controller.requestPermission()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
         }
     }
 

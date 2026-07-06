@@ -91,6 +91,7 @@ final class TilingEngine {
     func start() {
         guard !started else { return }
         started = true
+        Self.log.info("engine starting: adopting existing windows")
 
         displays = displayService.current()
         model.syncDisplays(displays.map(\.id))
