@@ -8,9 +8,36 @@ import SwiftUI
 @MainActor
 final class PermissionGate {
 
+    nonisolated(unsafe) static weak var shared: PermissionGate?
+
     var onGranted: (() -> Void)?
     private var window: NSWindow?
     private var poll: Task<Void, Never>?
+
+    init() {
+        Self.shared = self
+        // macOS posts this the moment any AX trust changes — instant
+        // detection instead of waiting on the poll.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.accessibility.api"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                // TCC needs a beat before AXIsProcessTrusted reflects it.
+                Task {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    PermissionGate.shared?.checkNow()
+                }
+            }
+        }
+    }
+
+    private func checkNow() {
+        if Self.isTrusted(), window != nil {
+            granted()
+        }
+    }
 
     static func isTrusted() -> Bool {
         AXIsProcessTrusted()
@@ -57,15 +84,21 @@ final class PermissionGate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        poll?.cancel()
         poll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .milliseconds(500))
                 if Self.isTrusted() {
                     self?.granted()
                     return
                 }
             }
         }
+    }
+
+    /// Belt and braces: anything that confirms trust can close the window.
+    func dismissWindow() {
+        dismiss()
     }
 
     private func requestAndOpenSettings() {

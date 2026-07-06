@@ -278,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startManaging() {
         guard PermissionGate.isTrusted(), !appState.axTrusted else { return }
         appState.axTrusted = true
+        permissionGate.dismissWindow()
         engine.start()
         hotkeys.start()
         let server = IPCServer(engine: engine)
