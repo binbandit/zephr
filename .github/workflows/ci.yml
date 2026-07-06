@@ -1,0 +1,28 @@
+# CI (§6.6): Core tests + app build on every push. Add the June developer
+# beta of each year's macOS as a lane the day runners exist for it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core-tests:
+    name: ZephrCore tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run engine test suite
+        run: swift test --package-path ZephrCore
+
+  app-build:
+    name: App build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Zephr.app (unsigned)
+        run: |
+          xcodebuild -project Zephr.xcodeproj -scheme Zephr \
+            -configuration Release build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
