@@ -17,6 +17,8 @@ final class AppState {
     var workspaceNames: [Int: String] = [:]
     /// Active workspace per connected display, in display order.
     var displayWorkspaces: [Int] = []
+    /// Whether the status-bar item is shown (config `menu-bar-icon`).
+    var showMenuBarIcon: Bool = true
 }
 
 /// The MainActor orchestrator (§6.2 WorkspaceEngine): owns the ZephrCore

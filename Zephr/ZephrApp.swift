@@ -8,7 +8,7 @@ struct ZephrApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: Bindable(delegate.appState).showMenuBarIcon) {
             MenuContent(appState: delegate.appState)
         } label: {
             // Quiet indicator (§5): a glyph and the current workspace number;
@@ -201,6 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             // §5: menu-bar app by default; `dock-icon = true` flips it on.
             NSApp.setActivationPolicy(parsed.showDockIcon ? .regular : .accessory)
+            self?.appState.showMenuBarIcon = parsed.showMenuBarIcon
         }
         // §6.4: a frame-veto teaches us an app must float — persist the rule.
         engine.onRuleLearned = { [weak self] bundleID, title in

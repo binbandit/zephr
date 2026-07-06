@@ -122,6 +122,8 @@ private struct GeneralSettings: View {
     @State private var leader = "alt-space"
     @State private var preset = "default"
     @State private var launchAtLogin = false
+    @State private var menuBarIcon = true
+    @State private var dockIcon = false
 
     private var config: ConfigService? { AppDelegate.shared?.configService }
 
@@ -147,6 +149,21 @@ private struct GeneralSettings: View {
             Toggle("Launch at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, _ in
                     AppDelegate.shared?.toggleLaunchAtLogin()
+                }
+
+            Toggle("Show menu bar icon", isOn: $menuBarIcon)
+                .onChange(of: menuBarIcon) { _, new in
+                    config?.setValue(section: nil, key: "menu-bar-icon", value: new ? "true" : "false")
+                }
+            if !menuBarIcon {
+                Text("With the icon hidden, reach Zephr via hotkeys, zephrctl, or this window (⌘, from the palette's app).")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Toggle("Show Dock icon", isOn: $dockIcon)
+                .onChange(of: dockIcon) { _, new in
+                    config?.setValue(section: nil, key: "dock-icon", value: new ? "true" : "false")
                 }
 
             LabeledContent("Config file:") {
@@ -175,6 +192,8 @@ private struct GeneralSettings: View {
                 .compactMap { $0 }.joined(separator: "-")
             preset = current.keyPreset
             launchAtLogin = SMAppService.mainApp.status == .enabled
+            menuBarIcon = current.showMenuBarIcon
+            dockIcon = current.showDockIcon
         }
     }
 }
