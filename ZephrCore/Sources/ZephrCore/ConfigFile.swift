@@ -36,6 +36,9 @@ public struct ParsedConfig: Sendable, Equatable {
     public var floatByDefaultWorkspaces: [Int] = []
     /// Show a Dock icon (§5: menu-bar app by default, a setting flips it on).
     public var showDockIcon: Bool = false
+    /// Show the menu-bar (status bar) item. Default true — it is the app's
+    /// primary always-visible surface.
+    public var showMenuBarIcon: Bool = true
     /// Close the leader layer after one command (§4.2 one-shot mode).
     public var layerOneShot: Bool = false
     /// Seconds of layer inactivity before it closes; 0 = never (§4.2).
@@ -65,6 +68,7 @@ public enum ConfigFile {
     # file the moment you save it. Errors show in the menu bar, never silently.
 
     leader = "alt-space"          # e.g. "ctrl-alt-space", "cmd-alt-space"
+    menu-bar-icon = true          # the status-bar workspace indicator
 
     [layout]
     gaps = 8                      # points between windows and screen edges
@@ -156,6 +160,8 @@ public enum ConfigFile {
                     config.leader = try parseLeader(try string(rawValue, line: lineNumber), line: lineNumber)
                 case "dock-icon":
                     config.showDockIcon = try bool(rawValue, line: lineNumber)
+                case "menu-bar-icon":
+                    config.showMenuBarIcon = try bool(rawValue, line: lineNumber)
                 default:
                     config.warnings.append(unknownKey(key, in: nil, line: lineNumber))
                 }
@@ -232,6 +238,11 @@ public enum ConfigFile {
             }
         }
 
+        // Never strand the user with no visible surface at all.
+        if !config.showMenuBarIcon && !config.showDockIcon {
+            config.warnings.append("menu-bar-icon and dock-icon are both off — reach Zephr via hotkeys, zephrctl, or by editing this file")
+        }
+
         for rule in rules {
             guard let app = rule.app, !app.isEmpty else {
                 throw ConfigError(line: rule.headerLine, message: "[[rules]] needs an `app` (bundle identifier)")
@@ -262,7 +273,7 @@ public enum ConfigFile {
     // MARK: - "Did you mean" (§4.6)
 
     private static let knownKeys: [String?: [String]] = [
-        nil: ["leader", "dock-icon"],
+        nil: ["leader", "dock-icon", "menu-bar-icon"],
         "layout": ["gaps", "inner-gaps", "outer-gaps", "accordion-padding", "focus-border", "default"],
         "keys": ["preset", "one-shot", "layer-timeout"],
         "callbacks": ["on-workspace-changed"],

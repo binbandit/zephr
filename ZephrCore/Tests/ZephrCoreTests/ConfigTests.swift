@@ -128,6 +128,16 @@ struct ConfigTests {
         #expect(parsed.layerTimeout == 5)
     }
 
+    @Test func menuBarIconDefaultsOnAndWarnsWhenAllSurfacesOff() throws {
+        #expect(try ConfigFile.parse("").showMenuBarIcon)
+        let off = try ConfigFile.parse("menu-bar-icon = false")
+        #expect(!off.showMenuBarIcon)
+        // No menu bar item AND no Dock icon: warn, never strand silently.
+        #expect(off.warnings.contains { $0.contains("both off") })
+        let dockOnly = try ConfigFile.parse("menu-bar-icon = false\ndock-icon = true")
+        #expect(dockOnly.warnings.isEmpty)
+    }
+
     @Test func commentsAndGapsRangeEnforced() throws {
         let parsed = try ConfigFile.parse("""
         [layout]
