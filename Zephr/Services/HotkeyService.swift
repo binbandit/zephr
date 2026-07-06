@@ -167,6 +167,8 @@ final class HotkeyService {
         Self.shared = self
     }
 
+    private var tapRetry: Task<Void, Never>?
+
     func start() {
         guard tap == nil else { return }
         let mask: CGEventMask =
@@ -181,9 +183,25 @@ final class HotkeyService {
             callback: hotkeyTapCallback,
             userInfo: nil
         ) else {
-            Self.log.error("event tap creation failed — is Accessibility granted?")
+            // A tap requested in the instant the Accessibility grant lands
+            // can fail before TCC propagates — retry instead of going deaf.
+            Self.log.error("event tap creation failed — retrying")
+            tapRetry?.cancel()
+            tapRetry = Task { [weak self] in
+                for _ in 0..<30 {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let self, !Task.isCancelled else { return }
+                    if self.tap != nil { return }
+                    self.start()
+                    if self.tap != nil {
+                        Self.log.info("event tap recovered")
+                        return
+                    }
+                }
+            }
             return
         }
+        tapRetry?.cancel()
         self.tap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)

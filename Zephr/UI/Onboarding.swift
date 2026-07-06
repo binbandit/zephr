@@ -167,7 +167,7 @@ final class OnboardingController {
         guard !model.permissionGranted, permissionPoll == nil else { return }
         permissionPoll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .milliseconds(500))
                 guard let self else { return }
                 if AXIsProcessTrusted() {
                     self.model.permissionGranted = true

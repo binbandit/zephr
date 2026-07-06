@@ -46,6 +46,9 @@ final class TilingEngine {
         var fullscreen: Bool = false
         var lastAppliedFrame: CGRect?
         var lastVisibleFrame: CGRect
+        /// The frame the window had when Zephr first saw it — quitting puts
+        /// every window back exactly here (§6.6).
+        var originalFrame: CGRect
         var vetoStrikes: Int = 0
     }
 
@@ -156,16 +159,17 @@ final class TilingEngine {
         }
     }
 
-    /// Orderly shutdown: every window back on screen, apps unhidden,
-    /// snapshot marked clean. Synchronous AX on purpose — we're exiting.
+    /// Orderly shutdown: every window returns to the exact frame it had
+    /// before Zephr managed it, apps unhidden, snapshot marked clean.
+    /// Synchronous AX on purpose — we're exiting.
     func shutdownRestore() {
         for pid in hiddenApps {
             NSRunningApplication(processIdentifier: pid)?.unhide()
         }
         hiddenApps.removeAll()
-        for mw in windows.values where !isVisible(mw.id) {
-            mw.element.set(kAXPositionAttribute, point: mw.lastVisibleFrame.origin)
-            mw.element.set(kAXSizeAttribute, size: mw.lastVisibleFrame.size)
+        for mw in windows.values where !mw.minimized && !mw.fullscreen {
+            mw.element.set(kAXPositionAttribute, point: mw.originalFrame.origin)
+            mw.element.set(kAXSizeAttribute, size: mw.originalFrame.size)
         }
         stateStore.saveNow(windows: snapshotRecords(), profiles: profiles, clean: true)
     }
@@ -252,7 +256,7 @@ final class TilingEngine {
             windows[id] = ManagedWindow(
                 id: id, pid: pid, bundleID: conn.bundleID, element: element,
                 title: snap.title, floating: false, fullscreen: true,
-                lastVisibleFrame: snap.frame
+                lastVisibleFrame: snap.frame, originalFrame: snap.frame
             )
             hub.watchWindow(pid: pid, element: element, id: id)
             return
@@ -293,7 +297,7 @@ final class TilingEngine {
         windows[id] = ManagedWindow(
             id: id, pid: pid, bundleID: conn.bundleID, element: element,
             title: snap.title, floating: floats, minimized: snap.minimized,
-            fullscreen: false, lastVisibleFrame: snap.frame
+            fullscreen: false, lastVisibleFrame: snap.frame, originalFrame: snap.frame
         )
         hub.watchWindow(pid: pid, element: element, id: id)
 
@@ -1040,16 +1044,25 @@ final class TilingEngine {
 
     // MARK: - Reconciliation audit (§6.4)
 
+    /// Trust readings can flap right after a grant; require several
+    /// consecutive misses before treating it as a real revocation.
+    private var axFailureStrikes = 0
+
     private func audit() {
         // Accessibility can be revoked while we run (§6.4: never fail
         // silently) — release the keyboard and ask again.
         if appState.axTrusted && !PermissionGate.isTrusted() {
-            Self.log.error("Accessibility permission revoked")
-            appState.axTrusted = false
-            setPaused(true)
-            AppDelegate.shared?.permissionGate.presentIfNeeded()
+            axFailureStrikes += 1
+            if axFailureStrikes >= 3 {
+                Self.log.error("Accessibility permission revoked")
+                axFailureStrikes = 0
+                appState.axTrusted = false
+                setPaused(true)
+                AppDelegate.shared?.permissionGate.presentIfNeeded()
+            }
             return
         }
+        axFailureStrikes = 0
 
         // Let in-flight writes settle first.
         let now = ContinuousClock.now
