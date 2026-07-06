@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keymap — Zephr</title>
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="index.html"><img src="favicon.png" alt=""> Zephr</a>
+  <a href="guide.html">Guide</a>
+  <a class="here" href="keys.html">Keys</a>
+  <a href="config.html">Configuration</a>
+  <a href="cli.html">CLI</a>
+  <a href="faq.html">FAQ</a>
+  <a class="gh" href="https://github.com/binbandit/zephr">GitHub</a>
+</nav>
+<main>
+
+<h1>The complete keymap</h1>
+<p class="lead">Two ways to do everything: the leader layer (discoverable) and direct chords (fast). Both always work.</p>
+
+<h2 id="leader"><a class="anchor" href="#leader">Leader</a></h2>
+<p>Default <kbd>⌥ Space</kbd> — toggles the command layer. Change it with <code>leader = "ctrl-alt-space"</code> (any of <code>ctrl</code>/<code>alt</code>/<code>cmd</code>/<code>shift</code> plus a key, at least one of ctrl/alt/cmd). While the layer is open, all keys are consumed by Zephr; <kbd>esc</kbd> or the leader closes it.</p>
+
+<h2 id="layer"><a class="anchor" href="#layer">Leader-layer keys</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Action</th><th>Direct chord</th></tr>
+<tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> or arrows</td><td>Focus left / down / up / right</td><td><kbd>⌃⌥ H/J/K/L</kbd></td></tr>
+<tr><td><kbd>⇧H</kbd> <kbd>⇧J</kbd> <kbd>⇧K</kbd> <kbd>⇧L</kbd></td><td>Move window left / down / up / right</td><td><kbd>⌃⌥⇧ H/J/K/L</kbd></td></tr>
+<tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Go to workspace (re-press current = previous)</td><td><kbd>⌃⌥ 1–9</kbd></td></tr>
+<tr><td><kbd>⇧1</kbd>–<kbd>⇧9</kbd></td><td>Send window to workspace</td><td><kbd>⌃⌥⇧ 1–9</kbd></td></tr>
+<tr><td><kbd>t</kbd></td><td>Toggle float on focused window</td><td><kbd>⌃⌥T</kbd></td></tr>
+<tr><td><kbd>m</kbd></td><td>Monocle (focused window fills workspace)</td><td><kbd>⌃⌥M</kbd></td></tr>
+<tr><td><kbd>s</kbd> / <kbd>v</kbd></td><td>Next window splits right / down</td><td>—</td></tr>
+<tr><td><kbd>space</kbd></td><td>Cycle container layout (tiles ↔ accordion)</td><td>—</td></tr>
+<tr><td><kbd>r</kbd></td><td>Resize mode (see below)</td><td><kbd>⌃⌥-</kbd> / <kbd>⌃⌥=</kbd> shrink / grow</td></tr>
+<tr><td><kbd>=</kbd></td><td>Balance sizes in container</td><td>—</td></tr>
+<tr><td><kbd>p</kbd></td><td>Open the palette</td><td><kbd>⌃⌥P</kbd></td></tr>
+<tr><td><kbd>q</kbd></td><td>Close focused window</td><td><kbd>⌃⌥Q</kbd></td></tr>
+<tr><td><kbd>w</kbd></td><td>Rescue all windows to current workspace</td><td>—</td></tr>
+<tr><td><kbd>tab</kbd></td><td>Focus next display</td><td><kbd>⌃⌥`</kbd></td></tr>
+<tr><td><kbd>?</kbd></td><td>Full cheat sheet</td><td>—</td></tr>
+<tr><td><kbd>esc</kbd> / leader</td><td>Close the layer</td><td>—</td></tr>
+</table></div>
+
+<h2 id="resize"><a class="anchor" href="#resize">Resize mode</a></h2>
+<p>Leader <kbd>r</kbd>, then:</p>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Action</th></tr>
+<tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd></td><td>Push the focused window's edge in that direction, 5% steps</td></tr>
+<tr><td><kbd>⇧</kbd> + direction</td><td>Fine steps (1%)</td></tr>
+<tr><td><kbd>esc</kbd> or <kbd>r</kbd></td><td>Back to the layer</td></tr>
+</table></div>
+<p>At a hard edge the opposite boundary moves instead, so the key always does something sensible.</p>
+
+<h2 id="presets"><a class="anchor" href="#presets">Chord presets</a></h2>
+<p>The chord modifier is a preset — set <code>preset</code> under <code>[keys]</code> or pick it in Settings. The leader layer is identical in all of them.</p>
+<div class="tablewrap"><table>
+<tr><th>Preset</th><th>Chords use</th><th>Who it's for</th></tr>
+<tr><td><code>default</code></td><td><kbd>⌃⌥</kbd> / <kbd>⌃⌥⇧</kbd></td><td>Everyone. No collisions with ⌥-typing, Emacs, or IDEs.</td></tr>
+<tr><td><code>i3</code></td><td><kbd>⌘⌥</kbd> / <kbd>⌘⌥⇧</kbd></td><td>$mod-style muscle memory on the Command cluster.</td></tr>
+<tr><td><code>aerospace</code></td><td><kbd>⌥</kbd> / <kbd>⌥⇧</kbd></td><td>AeroSpace migrators who want their exact chords. <strong>Warning:</strong> bare ⌥ breaks ⌥-character typing (é, ˙, …) by design of the preset.</td></tr>
+<tr><td><code>vim</code></td><td>none</td><td>Leader-only purists — chords disabled entirely.</td></tr>
+</table></div>
+
+<h2 id="behavior"><a class="anchor" href="#behavior">Layer behavior options</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Config</th><th>Effect</th></tr>
+<tr><td><code>[keys] one-shot = true</code></td><td>The layer closes after a single command (default: sticky)</td></tr>
+<tr><td><code>[keys] layer-timeout = 5</code></td><td>Close a forgotten layer after N seconds (default 0 = never)</td></tr>
+</table></div>
+
+<div class="note"><strong>Secure Input:</strong> when a password field or security tool holds the keyboard, macOS mutes event taps. Zephr shows a menu-bar warning and automatically falls back to system hotkeys for the ⌃⌥ chords; the leader layer resumes when Secure Input ends.</div>
+
+<div class="note"><strong>Key positions, not letters:</strong> bindings are by physical key position (ANSI). On Dvorak/Colemak the direction keys sit where QWERTY's h j k l are. Full rebinding arrives with the settings engine.</div>
+
+</main>
+<footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a></footer>
+</body>
+</html>

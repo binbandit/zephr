@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI & scripting — Zephr</title>
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="index.html"><img src="favicon.png" alt=""> Zephr</a>
+  <a href="guide.html">Guide</a>
+  <a href="keys.html">Keys</a>
+  <a href="config.html">Configuration</a>
+  <a class="here" href="cli.html">CLI</a>
+  <a href="faq.html">FAQ</a>
+  <a class="gh" href="https://github.com/binbandit/zephr">GitHub</a>
+</nav>
+<main>
+
+<h1>zephrctl</h1>
+<p class="lead">A tiny CLI over a Unix socket. Nothing requires it — hotkeys and the palette cover everything — but it makes scripting and bar integrations one-liners.</p>
+
+<h2 id="install"><a class="anchor" href="#install">Install</a></h2>
+<pre><code>just cli
+# or by hand:
+cp tools/zephrctl /usr/local/bin/ && chmod +x /usr/local/bin/zephrctl</code></pre>
+<p>The socket lives at <code>~/Library/Application Support/Zephr/zephr.sock</code> while Zephr runs. Protocol: one command per line in, one JSON reply per line out — trivially scriptable without the wrapper too.</p>
+
+<h2 id="commands"><a class="anchor" href="#commands">Commands</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Command</th><th>Effect</th></tr>
+<tr><td><code>focus left|down|up|right</code></td><td>Directional focus</td></tr>
+<tr><td><code>move left|down|up|right</code></td><td>Move the focused window</td></tr>
+<tr><td><code>workspace N</code></td><td>Go to workspace 1–9 (re-request = back-and-forth)</td></tr>
+<tr><td><code>send-to-workspace N</code></td><td>Send the focused window to workspace N</td></tr>
+<tr><td><code>toggle-float</code> / <code>monocle</code></td><td>Float toggle / monocle toggle</td></tr>
+<tr><td><code>resize left|down|up|right [--fine]</code></td><td>Resize 5% (1% with --fine)</td></tr>
+<tr><td><code>shrink</code> / <code>grow</code> / <code>balance</code></td><td>Share adjustments in the container</td></tr>
+<tr><td><code>split-h</code> / <code>split-v</code></td><td>Pre-select the next split's direction</td></tr>
+<tr><td><code>cycle-layout</code></td><td>Tiles ↔ accordion</td></tr>
+<tr><td><code>close</code></td><td>Close the focused window</td></tr>
+<tr><td><code>next-display</code></td><td>Focus the next display</td></tr>
+<tr><td><code>float-mode</code></td><td>Toggle float-by-default on the current workspace</td></tr>
+<tr><td><code>rescue</code></td><td>Bring every window to the current workspace</td></tr>
+<tr><td><code>pause</code> / <code>resume</code></td><td>Release / retake windows and the keyboard</td></tr>
+<tr><td><code>focus-window &lt;id&gt;</code></td><td>Focus a window by id (from list-windows)</td></tr>
+<tr><td><code>list-windows</code></td><td>JSON: id, app, title, workspace per managed window</td></tr>
+<tr><td><code>list-workspaces</code></td><td>JSON: id, name, window count, focused flag</td></tr>
+<tr><td><code>doctor</code></td><td>JSON health checks (permission, Stage Manager, rivals…)</td></tr>
+<tr><td><code>subscribe</code></td><td>Stream events until disconnected (below)</td></tr>
+</table></div>
+
+<h2 id="subscribe"><a class="anchor" href="#subscribe">The event stream</a></h2>
+<p><code>zephrctl subscribe</code> keeps the connection open and emits one JSON object per line:</p>
+<pre><code>{"event":"workspace_changed","workspace":"3"}
+{"event":"focus_changed","app":"com.googlecode.iterm2","title":"zsh","window":"12885"}
+{"event":"window_managed","app":"com.apple.Safari","title":"…","window":"30065"}
+{"event":"window_unmanaged","app":"com.apple.Safari","window":"30065"}
+{"event":"display_changed","displays":"2"}</code></pre>
+
+<h3>SketchyBar in two lines</h3>
+<pre><code># sketchybarrc — a workspace indicator driven by the stream
+zephrctl subscribe | while read -r line; do
+  ws=$(echo "$line" | jq -r 'select(.event=="workspace_changed").workspace')
+  [ -n "$ws" ] && sketchybar --set zephr label="$ws"
+done &amp;</code></pre>
+<p>Or skip the stream entirely and use the config callback:</p>
+<pre><code>[callbacks]
+on-workspace-changed = ["sketchybar --trigger ws_change WS=$ZEPHR_WORKSPACE"]</code></pre>
+
+<h2 id="examples"><a class="anchor" href="#examples">Recipes</a></h2>
+<pre><code># Jump straight to whatever Safari window is anywhere
+zephrctl list-windows | jq -r '.[] | select(.app=="Safari") | .id' \
+  | head -1 | xargs zephrctl focus-window
+
+# Pause tiling while a screen-share app runs
+zephrctl pause; open -W /Applications/zoom.us.app; zephrctl resume
+
+# Health check in scripts
+zephrctl doctor | jq -e 'all(.status=="pass")' >/dev/null || echo "zephr unhappy"</code></pre>
+
+</main>
+<footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a></footer>
+</body>
+</html>
