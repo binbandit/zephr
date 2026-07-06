@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zephr — the tiling window manager that feels like it shipped with the Mac</title>
+<meta name="description" content="A keyboard-driven tiling window manager for macOS. All of i3. None of the hostility.">
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="index.html"><img src="favicon.png" alt=""> Zephr</a>
+  <a href="guide.html">Guide</a>
+  <a href="keys.html">Keys</a>
+  <a href="config.html">Configuration</a>
+  <a href="cli.html">CLI</a>
+  <a href="faq.html">FAQ</a>
+  <a class="gh" href="https://github.com/binbandit/zephr">GitHub</a>
+</nav>
+<main>
+
+<div class="hero">
+  <img src="icon.png" alt="Zephr icon">
+  <h1>Zephr</h1>
+  <p class="tagline">The tiling window manager that feels like it shipped with the Mac.<br>All of i3. None of the hostility.</p>
+  <a class="cta" href="#install">Install</a>
+  <a class="cta secondary" href="guide.html">Learn it in 90 seconds</a>
+</div>
+
+<div class="grid">
+  <div class="card"><h3>Real tiling</h3><p>An i3-style tree: automatic layouts, splits, workspaces 1–9, focus by direction. New windows split the focused one along its longer edge — good layouts with zero commands.</p></div>
+  <div class="card"><h3>Discoverable</h3><p>Press the leader (⌥ Space) and a command strip shows what every key does. <kbd>?</kbd> expands the full cheat sheet. The layer teaches you the direct chords as you go.</p></div>
+  <div class="card"><h3>Never fights you</h3><p>Dialogs, pickers, and utility panels float automatically. Apps that refuse tiling are learned and left alone. Drag a window and it floats for the drag, with drop zones to re-tile.</p></div>
+  <div class="card"><h3>Layouts that survive real life</h3><p>Unplug your monitor and everything migrates; plug it back in and every window returns to its exact workspace, position, and split ratio — across reboots too.</p></div>
+  <div class="card"><h3>No compromises on trust</h3><p>Public APIs only. No SIP changes, ever. Hardened Runtime. One permission (Accessibility), explained and auto-detected.</p></div>
+  <div class="card"><h3>Never stalls</h3><p>Every app gets its own isolated worker with strict deadlines — a hung app can never freeze window management for the rest of the system.</p></div>
+</div>
+
+<h2 id="install"><a class="anchor" href="#install">Install</a></h2>
+
+<p>Zephr is distributed outside the Mac App Store (window managers require APIs the App Store doesn't allow — see the <a href="faq.html#mas">FAQ</a>).</p>
+
+<h3>From source</h3>
+<pre><code>git clone https://github.com/binbandit/zephr.git
+cd zephr
+just app install     # Release build → /Applications, launches it</code></pre>
+<p>Requires Xcode and <a href="https://github.com/casey/just">just</a> (<code>brew install just</code>). Without just: build the <code>Zephr</code> scheme in Xcode and copy the app to /Applications.</p>
+
+<h3>DMG</h3>
+<pre><code>just app dmg         # dev-signed DMG for your own machines
+just release         # Developer ID + notarized (needs an Apple Developer account)</code></pre>
+
+<h2 id="first-run"><a class="anchor" href="#first-run">First run — sixty seconds to tiled</a></h2>
+<ol>
+  <li><strong>Welcome</strong> — one screen, one button.</li>
+  <li><strong>Accessibility permission</strong> — the one permission every window manager needs. Zephr detects the grant the moment it lands; nothing to restart. (Granted before but it's not sticking? See <a href="faq.html#permissions">stale grants</a>.)</li>
+  <li><strong>Pick your leader key</strong> — default <kbd>⌥ Space</kbd>; Zephr suggests <kbd>⌃⌥ Space</kbd> if Raycast is around.</li>
+  <li><strong>Interactive tutorial</strong> — drives your real windows (and opens two practice windows if your desktop is empty). Steps check themselves off as you do them.</li>
+</ol>
+<p>Then: press the leader, hit <kbd>1</kbd>–<kbd>9</kbd> to switch workspaces, <kbd>h j k l</kbd> to focus, <kbd>⇧H J K L</kbd> to move. Everything else is on the strip, and <kbd>?</kbd> shows it all.</p>
+
+<h2 id="tour"><a class="anchor" href="#tour">What you get</a></h2>
+<ul>
+  <li><strong>Workspaces 1–9, per display</strong> — each monitor shows its own workspace; windows carry across display edges; re-press a workspace number to bounce back to the previous one.</li>
+  <li><strong>The palette</strong> (<kbd>⌃⌥P</kbd>) — fuzzy-search every window, workspace, and command. Deterministic app switching by name.</li>
+  <li><strong>Display profiles</strong> — layouts are recorded per monitor arrangement and restored exactly on redock, relaunch, and reboot.</li>
+  <li><strong>Config file</strong> — <code>~/.config/zephr/config.toml</code>, written with commented defaults on first run, hot-reloaded on save. A native Settings window edits the same file without touching your comments. <a href="config.html">Full reference.</a></li>
+  <li><strong>Pause</strong> — one click releases every window and the keyboard for screen sharing or games; resume puts it all back.</li>
+  <li><strong>zephrctl</strong> — a tiny CLI and event stream for scripting and SketchyBar. <a href="cli.html">Reference.</a></li>
+  <li><strong>Quitting restores everything</strong> — every window returns to the exact frame it had before Zephr managed it.</li>
+</ul>
+
+<div class="note">Zephr is signed, notarizable, Hardened-Runtime-enabled, and built exclusively on public macOS APIs. It never asks you to reduce your system's security.</div>
+
+</main>
+<footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a> · <a href="https://github.com/binbandit/zephr/blob/main/docs/DESIGN.md">Design document</a></footer>
+</body>
+</html>

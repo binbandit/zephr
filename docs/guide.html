@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guide — Zephr</title>
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="index.html"><img src="favicon.png" alt=""> Zephr</a>
+  <a class="here" href="guide.html">Guide</a>
+  <a href="keys.html">Keys</a>
+  <a href="config.html">Configuration</a>
+  <a href="cli.html">CLI</a>
+  <a href="faq.html">FAQ</a>
+  <a class="gh" href="https://github.com/binbandit/zephr">GitHub</a>
+</nav>
+<main>
+
+<h1>Using Zephr</h1>
+<p class="lead">Everything the app does, in the order you'll meet it.</p>
+
+<h2 id="model"><a class="anchor" href="#model">The mental model</a></h2>
+<p>Each workspace owns a <em>tree</em>. Windows are the leaves; the branches are containers that split horizontally or vertically. When a new window appears it splits the focused window along its longer edge, so layouts stay sensible with zero effort. Nothing ever reshuffles behind your back: the same action always produces the same result.</p>
+<p>Windows that <em>should</em> float, do — dialogs, pickers, non-resizable windows, small utility windows, and anything in the per-app rules. Everything else tiles.</p>
+
+<h2 id="leader"><a class="anchor" href="#leader">The leader layer</a></h2>
+<p>Press <kbd>⌥ Space</kbd> (or whatever you chose). A translucent <strong>command strip</strong> appears at the bottom of the screen showing what every key does. While it's open, keys act immediately and never leak to the app underneath.</p>
+<ul>
+  <li>The layer is <strong>sticky</strong>: <kbd>h h h ⇧L 3</kbd> flows as one thought. Close it with <kbd>esc</kbd> or the leader again. Prefer one-command-then-close? Set <code>one-shot = true</code> under <code>[keys]</code>.</li>
+  <li><kbd>?</kbd> expands the strip into the full cheat sheet.</li>
+  <li>The menu-bar item shows <strong>◆</strong> while the layer is open — no invisible modes.</li>
+  <li>After you've used the same layer command ten times, the strip shows its direct chord once — the layer teaches you the fast path.</li>
+</ul>
+<p>Every frequent command also has a direct <kbd>⌃⌥</kbd> chord that needs no leader. The defaults never bind bare <kbd>⌥</kbd>, so international typing (⌥e → é) and Emacs bindings survive. See the <a href="keys.html">complete keymap</a>.</p>
+
+<h2 id="workspaces"><a class="anchor" href="#workspaces">Workspaces</a></h2>
+<ul>
+  <li><kbd>1</kbd>–<kbd>9</kbd> switches; <kbd>⇧1</kbd>–<kbd>⇧9</kbd> sends the focused window along.</li>
+  <li><strong>Back-and-forth:</strong> re-press the workspace you're on to bounce to the previous one.</li>
+  <li><strong>Per display:</strong> each monitor shows its own active workspace. <kbd>⌃⌥`</kbd> (or leader <kbd>tab</kbd>) hops focus between displays; moving a window past the last split at a display edge carries it to the neighboring display.</li>
+  <li>Name workspaces and make one a floating junk drawer in the <a href="config.html#workspaces">config</a>. Names show in the menu bar and palette.</li>
+  <li>Inactive workspaces stash their windows off-screen and hide fully-stashed apps, so Mission Control stays clean. Leader <kbd>w</kbd> rescues <em>every</em> window to the current workspace if anything ever feels lost.</li>
+</ul>
+
+<h2 id="layouts"><a class="anchor" href="#layouts">Layouts, splits, and sizing</a></h2>
+<ul>
+  <li><kbd>s</kbd> / <kbd>v</kbd> pre-select the next split's direction (right / down).</li>
+  <li>Leader <kbd>space</kbd> cycles the focused container between <strong>tiles</strong> and <strong>accordion</strong> (non-focused windows collapse to slivers at the edges).</li>
+  <li><kbd>m</kbd> toggles <strong>monocle</strong>: the focused window temporarily fills the workspace.</li>
+  <li>Resize: leader <kbd>r</kbd> enters resize mode — <kbd>h j k l</kbd> adjust in 5% steps, <kbd>⇧</kbd> for 1%. Or <kbd>⌃⌥-</kbd> / <kbd>⌃⌥=</kbd> to shrink/grow directly. <kbd>=</kbd> in the layer balances the container.</li>
+  <li>Gaps are 8&nbsp;pt by default and configurable to 0.</li>
+</ul>
+
+<h2 id="floating"><a class="anchor" href="#floating">Floating</a></h2>
+<ul>
+  <li><kbd>t</kbd> toggles the focused window between tiled and floating. Floats keep their frame and sit above the tiles; move them with the focus-move keys (50&nbsp;pt nudges).</li>
+  <li>Zephr floats the right things automatically: dialogs and sheets, non-resizable windows, windows smaller than 500×350, modals, and a shipped per-app rules list (System Settings, Zoom's floating controls, and friends). Launchers like Raycast and Alfred are ignored entirely.</li>
+  <li>If an app repeatedly refuses the frames Zephr gives it, it gets floated automatically <em>and the rule is written into your config</em> so the fight never happens again.</li>
+</ul>
+
+<h2 id="mouse"><a class="anchor" href="#mouse">Mouse, when you want it</a></h2>
+<ul>
+  <li><strong>Drag to float:</strong> dragging a tiled window by its title bar floats it for the drag. Hover another tile and a highlight shows which half you'd drop into; release to re-tile there. Release over nothing and it stays floating.</li>
+  <li><strong>Resize on the gap:</strong> the gap between tiles is an invisible resize handle — the cursor changes, drag to move the split.</li>
+</ul>
+
+<h2 id="palette"><a class="anchor" href="#palette">The palette</a></h2>
+<p><kbd>⌃⌥P</kbd> (or leader <kbd>p</kbd>) opens a Spotlight-style palette that fuzzy-searches:</p>
+<ul>
+  <li><strong>Windows</strong> — app icon, title, workspace badge. Enter focuses it, switching workspace and display as needed. Native-fullscreen windows appear marked ⛶ and are summoned by activating their app.</li>
+  <li><strong>Workspaces</strong> — jump by number or name.</li>
+  <li><strong>Commands</strong> — everything Zephr can do, searchable by name. Forgot a key? Type the command.</li>
+</ul>
+
+<h2 id="displays"><a class="anchor" href="#displays">Displays, docking, and sessions</a></h2>
+<p>Zephr continuously records a <strong>profile</strong> per display arrangement: which workspace lives on which display, every tree with its split ratios, and every floating frame. Unplug a monitor and workspaces migrate to what's left; plug it back in and everything returns exactly. The same mechanism reassembles your layout after a relaunch or reboot, matching windows by app and title as they reappear.</p>
+<p>Profiles are visible (and deletable) in Settings → Profiles.</p>
+
+<h2 id="pause"><a class="anchor" href="#pause">Pausing</a></h2>
+<p>Menu bar → <em>Pause Zephr</em> (also in the palette, or <code>zephrctl pause</code>). Pausing restores every stashed window, unhides apps, and releases the keyboard completely — Zephr goes fully inert for screen sharing, presentations, or games. Resume re-applies the layout. The menu-bar item shows ⏸ while paused.</p>
+
+<h2 id="menubar"><a class="anchor" href="#menubar">The menu bar item</a></h2>
+<p>A quiet glyph plus the current workspace (per display when you have several, e.g. <code>3·1</code>). The menu holds the workspace switcher, rescue, pause, config/tutorial/doctor entry points, launch-at-login, and Settings (<kbd>⌘,</kbd>). You can hide the icon (<code>menu-bar-icon = false</code>) or add a Dock icon (<code>dock-icon = true</code>).</p>
+
+<h2 id="settings"><a class="anchor" href="#settings">Settings vs. the config file</a></h2>
+<p>Both edit the same file — <code>~/.config/zephr/config.toml</code>. The Settings window changes only the keys you touch and preserves your comments and formatting; hand-edits hot-reload the moment you save. Zephr is fully usable without ever opening Settings, and fully configurable without ever opening Settings. <a href="config.html">Full reference.</a></p>
+
+<h2 id="quit"><a class="anchor" href="#quit">Quitting and uninstalling</a></h2>
+<p>Quitting Zephr returns every window to the exact frame it had before Zephr managed it and unhides everything — no trace left. Uninstall by quitting, deleting the app, and (optionally) removing <code>~/.config/zephr</code> and <code>~/Library/Application Support/Zephr</code>.</p>
+
+</main>
+<footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a></footer>
+</body>
+</html>

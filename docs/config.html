@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration — Zephr</title>
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="index.html"><img src="favicon.png" alt=""> Zephr</a>
+  <a href="guide.html">Guide</a>
+  <a href="keys.html">Keys</a>
+  <a class="here" href="config.html">Configuration</a>
+  <a href="cli.html">CLI</a>
+  <a href="faq.html">FAQ</a>
+  <a class="gh" href="https://github.com/binbandit/zephr">GitHub</a>
+</nav>
+<main>
+
+<h1>Configuration</h1>
+<p class="lead"><code>~/.config/zephr/config.toml</code> — written with commented defaults on first run, hot-reloaded the moment you save. Every value is optional; an empty file is a complete configuration.</p>
+
+<ul>
+  <li><strong>Errors are never silent:</strong> a typo shows in the menu bar with its line number ("line 7: expected true or false"), and unknown keys get a <em>did-you-mean</em> suggestion. A broken file never takes window management down — Zephr keeps the last good config.</li>
+  <li><strong>The Settings window edits this same file</strong>, changing only the keys you touch. Comments, ordering, and formatting survive — safe to keep in your dotfiles.</li>
+</ul>
+
+<h2 id="full"><a class="anchor" href="#full">The whole file</a></h2>
+<pre><code># ~/.config/zephr/config.toml — everything optional; these are the defaults.
+
+leader = "alt-space"          # modifiers-key: ctrl/alt/cmd/shift + a key
+menu-bar-icon = true          # the status-bar workspace indicator
+dock-icon = false             # menu-bar app by default
+
+[layout]
+gaps = 8                      # points between windows and screen edges
+accordion-padding = 48        # collapsed sliver width in accordion layout
+focus-border = true           # accent border on the focused window
+default = "tiles"             # tiles | accordion for new workspaces
+
+[keys]
+preset = "default"            # default | i3 | aerospace | vim
+one-shot = false              # close the layer after one command
+layer-timeout = 0             # seconds; 0 = layer never times out
+
+[workspaces]
+1 = "code"                    # optional names, shown in menu bar & palette
+4 = "chat"
+float-by-default = [9]        # junk-drawer workspaces: new windows float
+
+[[rules]]
+app = "com.apple.systempreferences"
+action = "float"              # float | tile | ignore | "workspace N"
+
+[[rules]]
+app = "us.zoom.xos"
+title = "^zoom floating"      # optional regex on the window title
+action = "float"
+
+[[rules]]
+app = "com.tinyspeck.slackmacgap"
+action = "workspace 4"        # Slack always opens on workspace 4
+
+[callbacks]
+on-workspace-changed = []     # shell commands; $ZEPHR_WORKSPACE is set</code></pre>
+
+<h2 id="root"><a class="anchor" href="#root">Top-level keys</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>leader</code></td><td><code>"alt-space"</code></td><td>The leader chord. Hyphen-separated modifiers (<code>ctrl</code>, <code>alt</code>/<code>opt</code>, <code>cmd</code>, <code>shift</code>) ending in a key name (letters, digits, <code>space</code>, <code>tab</code>, <code>grave</code>). At least one of ctrl/alt/cmd is required.</td></tr>
+<tr><td><code>menu-bar-icon</code></td><td><code>true</code></td><td>Show the status-bar item. Turning this <em>and</em> <code>dock-icon</code> off warns you: hotkeys, zephrctl, and this file remain your surfaces.</td></tr>
+<tr><td><code>dock-icon</code></td><td><code>false</code></td><td>Show a Dock icon.</td></tr>
+</table></div>
+
+<h2 id="layout"><a class="anchor" href="#layout">[layout]</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>gaps</code></td><td><code>8</code></td><td>Points between windows and screen edges (0–100). Sets both inner and outer.</td></tr>
+<tr><td><code>inner-gaps</code> / <code>outer-gaps</code></td><td>—</td><td>Override the two independently.</td></tr>
+<tr><td><code>accordion-padding</code></td><td><code>48</code></td><td>Sliver width for collapsed accordion siblings (2–400).</td></tr>
+<tr><td><code>focus-border</code></td><td><code>true</code></td><td>2&nbsp;pt accent-colored outline on the focused window.</td></tr>
+<tr><td><code>default</code></td><td><code>"tiles"</code></td><td>Layout new workspaces start in: <code>tiles</code> or <code>accordion</code>.</td></tr>
+</table></div>
+
+<h2 id="keys"><a class="anchor" href="#keys">[keys]</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>preset</code></td><td><code>"default"</code></td><td>Chord modifiers: <code>default</code> ⌃⌥ · <code>i3</code> ⌘⌥ · <code>aerospace</code> bare ⌥ (breaks ⌥-typing!) · <code>vim</code> leader-only. <a href="keys.html#presets">Details.</a></td></tr>
+<tr><td><code>one-shot</code></td><td><code>false</code></td><td>Close the leader layer after a single command.</td></tr>
+<tr><td><code>layer-timeout</code></td><td><code>0</code></td><td>Seconds of layer inactivity before it closes; 0 = never (0–300).</td></tr>
+</table></div>
+
+<h2 id="workspaces"><a class="anchor" href="#workspaces">[workspaces]</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Meaning</th></tr>
+<tr><td><code>1</code>–<code>9</code></td><td>Workspace names, e.g. <code>4 = "chat"</code>. Shown in the menu bar, palette, and <code>zephrctl list-workspaces</code>.</td></tr>
+<tr><td><code>float-by-default</code></td><td>List of workspaces where new windows float instead of tiling — the junk-drawer pattern, e.g. <code>[9]</code>.</td></tr>
+</table></div>
+
+<h2 id="rules"><a class="anchor" href="#rules">[[rules]]</a></h2>
+<p>One block per rule; <strong>first match wins</strong>, and your rules run before Zephr's shipped list. Add them here, in Settings → Rules (which has an "Add Rule for Focused Window" shortcut), or let Zephr learn them: apps that repeatedly refuse tiling get a float rule written automatically.</p>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Meaning</th></tr>
+<tr><td><code>app</code></td><td>Bundle identifier (required). Find it with <code>osascript -e 'id of app "Slack"'</code> or via <code>zephrctl list-windows</code>.</td></tr>
+<tr><td><code>title</code></td><td>Optional case-insensitive regex on the window title.</td></tr>
+<tr><td><code>action</code></td><td><code>"float"</code> · <code>"tile"</code> (override a heuristic) · <code>"ignore"</code> (Zephr never touches it) · <code>"workspace N"</code> (windows open on workspace N).</td></tr>
+</table></div>
+<p><strong>Even without rules</strong>, structural heuristics float dialogs, sheets, modals, non-resizable windows, and windows smaller than 500×350; launchers (Raycast, Alfred, Spotlight) and system chrome are ignored; native-fullscreen windows are left to macOS.</p>
+
+<h2 id="callbacks"><a class="anchor" href="#callbacks">[callbacks]</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Meaning</th></tr>
+<tr><td><code>on-workspace-changed</code></td><td>Shell commands run on every workspace switch with <code>$ZEPHR_WORKSPACE</code> set. Example: <code>["sketchybar --trigger ws_change WS=$ZEPHR_WORKSPACE"]</code>. For richer integrations use <a href="cli.html#subscribe">zephrctl subscribe</a>.</td></tr>
+</table></div>
+
+<h2 id="files"><a class="anchor" href="#files">Where things live</a></h2>
+<div class="tablewrap"><table>
+<tr><th>Path</th><th>Contents</th></tr>
+<tr><td><code>~/.config/zephr/config.toml</code></td><td>Your configuration (dotfiles-friendly).</td></tr>
+<tr><td><code>~/Library/Application Support/Zephr/state.json</code></td><td>Crash-safe window snapshots and display profiles. Safe to delete; Zephr rebuilds it.</td></tr>
+<tr><td><code>~/Library/Application Support/Zephr/zephr.sock</code></td><td>The <a href="cli.html">zephrctl</a> socket, present while Zephr runs.</td></tr>
+</table></div>
+
+<h2 id="migrating"><a class="anchor" href="#migrating">Migrating from AeroSpace or Amethyst</a></h2>
+<p>Settings → General → <em>Import from AeroSpace / Amethyst</em> (also offered at the end of onboarding when a config is detected). Zephr reads <code>.aerospace.toml</code> — gaps and per-app float/tile rules map directly — and Amethyst's float list, then shows a plain-language report of what mapped and what didn't. AeroSpace keybindings aren't imported: set <code>preset = "aerospace"</code> to keep the ⌥-chord muscle memory instead.</p>
+
+</main>
+<footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a></footer>
+</body>
+</html>

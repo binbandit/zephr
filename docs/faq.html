@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAQ & troubleshooting — Zephr</title>
+<link rel="icon" href="favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="index.html"><img src="favicon.png" alt=""> Zephr</a>
+  <a href="guide.html">Guide</a>
+  <a href="keys.html">Keys</a>
+  <a href="config.html">Configuration</a>
+  <a href="cli.html">CLI</a>
+  <a class="here" href="faq.html">FAQ</a>
+  <a class="gh" href="https://github.com/binbandit/zephr">GitHub</a>
+</nav>
+<main>
+
+<h1>FAQ & troubleshooting</h1>
+<p class="lead">Start with the built-in doctor: menu bar → <em>Run Doctor…</em> (or <code>zephrctl doctor</code>). It checks everything on this page and offers one-click fixes.</p>
+
+<h2 id="permissions"><a class="anchor" href="#permissions">I granted Accessibility but Zephr keeps asking / nothing tiles</a></h2>
+<p>macOS binds the Accessibility grant to the app's <em>code signature</em>. After an update or a rebuild with a different signature, System Settings still shows the old checkmark — but the running app is refused. This is the single most common issue with every window manager.</p>
+<p><strong>Fix:</strong> the permission window has a <em>"Reset Stale Permission…"</em> button — click it, then check the box again. By hand:</p>
+<pre><code>tccutil reset Accessibility dev.zephr.Zephr</code></pre>
+<p>then re-grant in System Settings → Privacy & Security → Accessibility. Zephr detects the grant instantly; nothing to restart. Release builds keep a stable signature, so this is a once-per-signature event, not a routine.</p>
+
+<h2 id="keys-dead"><a class="anchor" href="#keys-dead">My hotkeys stopped working</a></h2>
+<ol>
+  <li><strong>Secure Input?</strong> A password field or security tool is holding the keyboard — the menu bar shows a warning. The ⌃⌥ chords automatically fall back to system hotkeys; the leader layer resumes when Secure Input ends. Common holders: password prompts left open, some VPNs and password managers.</li>
+  <li><strong>Paused?</strong> The menu-bar item shows ⏸ while paused — Zephr releases the keyboard entirely by design. Menu bar → Resume.</li>
+  <li><strong>Permission stale?</strong> See <a href="#permissions">above</a> — a dead event tap and a refused permission are the same disease. Zephr retries tap creation automatically for 30 seconds after a grant.</li>
+</ol>
+
+<h2 id="not-tiling"><a class="anchor" href="#not-tiling">A window won't tile / tiles when it shouldn't</a></h2>
+<ul>
+  <li>Dialogs, non-resizable windows, modals, and windows under 500×350 float on purpose. <kbd>⌃⌥T</kbd> overrides any single window; a <code>[[rules]]</code> entry with <code>action = "tile"</code> or <code>"float"</code> makes it permanent (Settings → Rules can write it for you).</li>
+  <li>Apps that <em>refuse</em> the frames Zephr sets (fixed-size windows) are floated automatically after two attempts, and the rule is saved so it's remembered.</li>
+  <li>Native-fullscreen windows are deliberately unmanaged — macOS owns that Space. They're listed in the palette marked ⛶ and re-tile the moment they leave fullscreen.</li>
+  <li>Minimized windows leave the tree and rejoin when restored.</li>
+</ul>
+
+<h2 id="lost"><a class="anchor" href="#lost">I can't find a window</a></h2>
+<p>Two one-keystroke answers: the palette (<kbd>⌃⌥P</kbd>) finds any window by name anywhere, and leader <kbd>w</kbd> rescues <em>every</em> window to the current workspace. Losing a window permanently is treated as a critical bug — if rescue ever fails you, please file an issue.</p>
+
+<h2 id="stage-manager"><a class="anchor" href="#stage-manager">Stage Manager</a></h2>
+<p>Incompatible by nature — it rearranges windows on its own. Zephr detects it and shows the doctor with a one-click path to Desktop &amp; Dock settings to turn it off.</p>
+
+<h2 id="rivals"><a class="anchor" href="#rivals">Can I run Zephr alongside yabai / AeroSpace / Rectangle?</a></h2>
+<p>No — two managers will fight over every window. Zephr checks at launch and names any it finds. (Migrating? The <a href="config.html#migrating">importer</a> brings your AeroSpace rules and gaps across.)</p>
+
+<h2 id="mas"><a class="anchor" href="#mas">Why isn't Zephr on the Mac App Store?</a></h2>
+<p>It can't be. Controlling other apps' windows requires the Accessibility API and a keyboard event tap; both are disallowed for sandboxed App Store apps. This is true of every window manager. Zephr ships as a signed, Hardened-Runtime, notarizable app distributed directly.</p>
+
+<h2 id="spaces"><a class="anchor" href="#spaces">Why virtual workspaces instead of macOS Spaces?</a></h2>
+<p>Apple provides no public API to create, switch, or move windows between Spaces — tools that control Spaces do it by disabling SIP, which Zephr will never ask for. Zephr's workspaces are its own, engineered to be seamless: computed off-screen stashing that adapts to any monitor arrangement, app-hiding so Mission Control stays clean, and a hard never-lose-a-window guarantee. Windows on your other native Spaces are simply left alone.</p>
+
+<h2 id="battery"><a class="anchor" href="#battery">Will it drain my battery?</a></h2>
+<p>It's designed not to: event-driven first, with a reconciliation audit that only runs while things are actually happening (a deep sweep every ~30&nbsp;s at idle), coalesced timers, and per-app queues at sensible QoS. Idle CPU budget is &lt;0.5%. If you ever see it misbehave in Activity Monitor, that's a bug — report it.</p>
+
+<h2 id="multimon"><a class="anchor" href="#multimon">How does multi-monitor work?</a></h2>
+<p>Each display shows its own workspace (the menu bar reads e.g. <code>3·1</code>). Focus and window-moves cross display edges naturally; <kbd>⌃⌥`</kbd> hops displays. Docking and undocking is the signature feature: layouts are recorded per arrangement and restored exactly — see <a href="guide.html#displays">the guide</a>.</p>
+
+<h2 id="electron"><a class="anchor" href="#electron">Electron apps behave oddly</a></h2>
+<p>Chromium/Electron windows misreport geometry unless a specific accessibility flag is toggled around every frame write — Zephr does this automatically. If a specific Electron app still misplaces, add a rule for it and file an issue with the app name.</p>
+
+<h2 id="uninstall"><a class="anchor" href="#uninstall">Uninstalling</a></h2>
+<ol>
+  <li>Quit Zephr — every window returns to the exact frame it had before Zephr managed it, and hidden apps are unhidden.</li>
+  <li>Delete Zephr.app.</li>
+  <li>Optional cleanup: <code>~/.config/zephr</code>, <code>~/Library/Application Support/Zephr</code>, and <code>tccutil reset Accessibility dev.zephr.Zephr</code>.</li>
+</ol>
+
+<h2 id="logs"><a class="anchor" href="#logs">Getting diagnostics for a bug report</a></h2>
+<pre><code>zephrctl doctor
+log show --predicate 'subsystem == "dev.zephr"' --last 10m --style compact</code></pre>
+<p>Include both outputs, your macOS version, and (if window-placement related) your display arrangement.</p>
+
+<h2 id="design"><a class="anchor" href="#design">Where's the deeper reasoning?</a></h2>
+<p>The full <a href="https://github.com/binbandit/zephr/blob/main/docs/DESIGN.md">design document</a> covers the product thesis, the competitive research, the architecture (per-app actors, reconciliation, the stash), and the invariants: never lose a window, never require reduced security, never stall.</p>
+
+</main>
+<footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a></footer>
+</body>
+</html>
