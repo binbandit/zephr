@@ -16,6 +16,18 @@ final class PermissionGate {
         AXIsProcessTrusted()
     }
 
+    /// macOS ties the Accessibility grant to the app's code signature. After
+    /// re-signing (updates, dev builds), System Settings still shows the old
+    /// checkmark but the running binary is refused — the check "looks
+    /// broken". Resetting drops the stale record so a fresh grant sticks.
+    static func resetStaleGrant() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        process.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "dev.zephr.Zephr"]
+        try? process.run()
+        process.waitUntilExit()
+    }
+
     func presentIfNeeded() {
         guard !Self.isTrusted() else {
             onGranted?()
@@ -24,6 +36,10 @@ final class PermissionGate {
 
         let content = PermissionView(
             openSettings: { [weak self] in self?.requestAndOpenSettings() },
+            resetStale: { [weak self] in
+                PermissionGate.resetStaleGrant()
+                self?.requestAndOpenSettings()
+            },
             later: { [weak self] in self?.dismiss() }
         )
         let window = NSWindow(
@@ -76,10 +92,11 @@ final class PermissionGate {
 
 private struct PermissionView: View {
     let openSettings: () -> Void
+    let resetStale: () -> Void
     let later: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Image(systemName: "rectangle.3.group")
                 .font(.system(size: 44, weight: .light))
                 .foregroundStyle(.tint)
@@ -99,7 +116,18 @@ private struct PermissionView: View {
                 Button("Open System Settings", action: openSettings)
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(.bottom, 28)
+
+            Divider().padding(.horizontal, 60)
+
+            Text("Already checked in System Settings but this window won't go away? macOS bound that grant to an older build. Reset it, then check the box again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+
+            Button("Reset Stale Permission…", action: resetStale)
+                .controlSize(.small)
+                .padding(.bottom, 24)
         }
         .frame(width: 460)
     }
