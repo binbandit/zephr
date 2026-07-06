@@ -7,9 +7,11 @@ override everything else, and §-references in code comments point into it.
 
 ## Build & test
 
-- Core engine tests (fast, pure, no permissions needed):
-  `cd ZephrCore && swift test`
-- App build: `xcodebuild -project Zephr.xcodeproj -scheme Zephr build`
+- `just` lists all recipes: `just test` (Core suite), `just run` (build +
+  launch), `just app dmg` (dev-signed DMG), `just release` (archive →
+  Developer ID export → DMG → notarize; needs `just notary-setup` once).
+- Without just: `cd ZephrCore && swift test` and
+  `xcodebuild -project Zephr.xcodeproj -scheme Zephr build`.
 - Running the app requires the Accessibility permission (granted via the
   first-run window). Rebuilds under ad-hoc signing may require re-granting.
 

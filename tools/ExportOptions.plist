@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Zephr distributes outside the Mac App Store (docs/DESIGN.md §6.7):
+	     Developer ID signing + notarization. Requires a paid Apple
+	     Developer Program membership and a Developer ID certificate. -->
+	<key>method</key>
+	<string>developer-id</string>
+	<key>destination</key>
+	<string>export</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+</dict>
+</plist>
