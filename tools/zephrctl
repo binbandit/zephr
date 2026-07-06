@@ -1,0 +1,25 @@
+#!/bin/sh
+# zephrctl — command a running Zephr over its Unix socket (docs/DESIGN.md §4.8).
+#
+# Usage:
+#   zephrctl focus left|down|up|right      zephrctl move left|down|up|right
+#   zephrctl workspace N                   zephrctl send-to-workspace N
+#   zephrctl toggle-float | monocle | balance | rescue | close
+#   zephrctl pause | resume                zephrctl focus-window <id>
+#   zephrctl list-windows | list-workspaces | subscribe
+#
+# Install: cp tools/zephrctl /usr/local/bin/ && chmod +x /usr/local/bin/zephrctl
+
+SOCK="$HOME/Library/Application Support/Zephr/zephr.sock"
+
+if [ "$1" = "--help" ] || [ -z "$1" ]; then
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+if [ ! -S "$SOCK" ]; then
+    echo "zephr is not running (no socket at $SOCK)" >&2
+    exit 1
+fi
+
+printf '%s\n' "$*" | /usr/bin/nc -U "$SOCK"
