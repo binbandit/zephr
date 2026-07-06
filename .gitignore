@@ -11,3 +11,6 @@ build/
 .build/
 .swiftpm/
 Package.resolved
+
+# Release pipeline output (justfile)
+dist/
