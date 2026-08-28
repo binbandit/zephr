@@ -233,7 +233,8 @@ actor AppAXConnection {
         button.perform(kAXPressAction)
     }
 
-    /// Raises a window above its app siblings and marks it main.
+    /// Orders `id` to the front *within* its application. Use for stacking
+    /// only — this does not move the keyboard (see `focus`).
     func raise(_ id: WindowID) {
         guard let el = windows[id], !isDegraded else { return }
         let madeMain = el.set(kAXMainAttribute, to: kCFBooleanTrue)
@@ -241,6 +242,32 @@ actor AppAXConnection {
         if !madeMain, !raised, el.liveness == .unresponsive {
             noteTimeout()   // §6.3 ladder
         }
+    }
+
+    /// Makes `id` the window the user is typing into, and reports whether it
+    /// worked.
+    ///
+    /// `kAXMain` and `AXRaise` only order windows inside an application;
+    /// neither changes which app owns the keyboard. Zephr is an `LSUIElement`
+    /// agent and is never frontmost when a focus command runs, so under
+    /// macOS cooperative activation `NSRunningApplication.activate()` can be
+    /// declined outright — the focus ring moves and the keystrokes keep
+    /// going to the previous app, which reads as the whole product being
+    /// broken. Setting `kAXFrontmost` on the application element is the
+    /// public-API path that is not subject to that arbitration.
+    ///
+    /// The read-back is the point: focus is the one command that must never
+    /// fail silently, so the caller gets a verdict it can retry on.
+    func focus(_ id: WindowID) -> Bool {
+        guard let el = windows[id], !isDegraded else { return false }
+        let madeMain = el.set(kAXMainAttribute, to: kCFBooleanTrue)
+        let raised = el.perform(kAXRaiseAction)
+        let fronted = app.set(kAXFrontmostAttribute, to: kCFBooleanTrue)
+        if !madeMain, !raised, !fronted, el.liveness == .unresponsive {
+            noteTimeout()
+            return false
+        }
+        return app.bool(kAXFrontmostAttribute) == true
     }
 
     // MARK: - Audit (reconciliation input, §6.4)
