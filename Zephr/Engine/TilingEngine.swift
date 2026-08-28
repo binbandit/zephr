@@ -42,14 +42,27 @@ final class TilingEngine {
         var title: String
         var floating: Bool
         var minimized: Bool = false
+        /// Withdrawn because the user hid the whole app (⌘H), rather than
+        /// minimizing this window. Tracked separately because AX still
+        /// reports the window as un-minimized, so the audit would otherwise
+        /// put it straight back into the layout.
+        var appHidden: Bool = false
         /// Native fullscreen: unmanaged but palette-listed (§6.4).
         var fullscreen: Bool = false
         var lastAppliedFrame: CGRect?
+        /// Read-back after the last write settled. Snapping apps (Terminal's
+        /// character grid) land a few points off target forever; convergence
+        /// accepts either frame so we stop re-issuing writes (§6.3).
+        var lastSettledFrame: CGRect?
         var lastVisibleFrame: CGRect
         /// The frame the window had when Zephr first saw it — quitting puts
         /// every window back exactly here (§6.6).
         var originalFrame: CGRect
         var vetoStrikes: Int = 0
+        /// Workspace the window was in when it minimized or went native
+        /// fullscreen — restoring puts it back there, not wherever the user
+        /// happens to be (§4.4).
+        var suspendedWorkspace: Int?
     }
 
     private(set) var windows: [WindowID: ManagedWindow] = [:]
@@ -67,6 +80,20 @@ final class TilingEngine {
     /// Display profiles by fingerprint (§4.5), persisted in state.json.
     private var profiles: [String: ModelSnapshot] = [:]
     private var profileCaptureEnabled = false
+    /// The saved profile for the launch arrangement, held immutable until
+    /// adoption quiesces (§4.5) — a fixed startup delay loses the reboot
+    /// race and the next capture would clobber the good profile.
+    private var pendingRestore: ModelSnapshot?
+    private var lastAdoptionAt = ContinuousClock.now
+    /// Pids whose windows are not currently verifiable (§6.3): the last
+    /// audit reported unresponsive windows, or a frame batch aborted on a
+    /// messaging timeout. Their windows keep cached geometry, profiles are
+    /// not captured while any app is in this state, and the first clean
+    /// audit afterwards re-applies their displays (§6.4 convergence).
+    private var unresponsivePids: Set<pid_t> = []
+    /// At most one audit in flight per pid (§6.3): a slow-but-alive app must
+    /// not accumulate queued audits faster than they drain.
+    private var auditsInFlight: Set<pid_t> = []
 
     let hub: ObserverHub
     let displayService: DisplayService
@@ -102,6 +129,16 @@ final class TilingEngine {
 
         hub.onEvent = { [weak self] event in self?.handle(event) }
 
+        // Crash recovery (§6.6) runs before adoption or profile matching can
+        // look at the wreckage: if the last run died mid-flight, unhide the
+        // apps we hid and pull windows still parked at stash coordinates
+        // back on screen (invariant 1).
+        let saved = stateStore.load()
+        profiles = saved?.profiles ?? [:]
+        if let saved, !saved.cleanShutdown {
+            recoverFromCrash(saved)
+        }
+
         let workspaceNC = NSWorkspace.shared.notificationCenter
         workspaceNC.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
@@ -119,6 +156,19 @@ final class TilingEngine {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             guard let pid = app?.processIdentifier else { return }
             MainActor.assumeIsolated { TilingEngine.shared?.detachApp(pid: pid) }
+        }
+        // ⌘H (§6.4): an app's windows leave the screen without a single AX
+        // notification, so without this the layout holds tiles for windows
+        // nobody can see until the app comes back.
+        workspaceNC.addObserver(forName: NSWorkspace.didHideApplicationNotification, object: nil, queue: .main) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard let pid = app?.processIdentifier else { return }
+            MainActor.assumeIsolated { TilingEngine.shared?.noteAppHidden(pid: pid) }
+        }
+        workspaceNC.addObserver(forName: NSWorkspace.didUnhideApplicationNotification, object: nil, queue: .main) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard let pid = app?.processIdentifier else { return }
+            MainActor.assumeIsolated { TilingEngine.shared?.noteAppUnhidden(pid: pid) }
         }
         workspaceNC.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
@@ -146,32 +196,142 @@ final class TilingEngine {
             }
         }
 
-        // Session restore (§4.5): load saved profiles, then — after the
-        // adoption sweep settles — reassemble the layout for the current
-        // display arrangement. Capture is gated until then so a half-adopted
-        // startup can't overwrite a good profile.
-        profiles = stateStore.load()?.profiles ?? [:]
+        // Session restore (§4.5): the profile for this arrangement stays
+        // pending — and capture stays off — until adoption *quiesces* (no
+        // new adoptions for a few seconds). A fixed delay structurally fails
+        // on login: most apps adopt their windows long after it, the profile
+        // matches almost nothing, and the next capture would overwrite the
+        // saved profile with a near-empty model. While pending, `adopt()`
+        // places late windows from the profile (see below).
+        pendingRestore = profile(matching: ProfileEngine.fingerprint(currentSlots()))
         Task {
-            try? await Task.sleep(for: .seconds(2))
+            let began = ContinuousClock.now
+            while ContinuousClock.now - began < .seconds(30) {
+                try? await Task.sleep(for: .seconds(1))
+                if ContinuousClock.now - self.lastAdoptionAt > .seconds(3) { break }
+            }
             self.restoreSession()
             self.profileCaptureEnabled = true
             self.persistSoon()
         }
     }
 
+    /// §6.6 crash recovery: the previous run died without its restore pass,
+    /// so apps we hid are still hidden and stashed windows still sit at
+    /// off-screen coordinates with no manager running them. Unhide, then
+    /// move every stashed-looking window to its recorded frame (or a visible
+    /// fallback). The per-app AX sweep runs off the MainActor with short
+    /// per-element timeouts; recovery must never be the thing that freezes
+    /// the launch it is recovering (invariant 1 without breaking 3).
+    private func recoverFromCrash(_ saved: StateStore.Snapshot) {
+        Self.log.warning("unclean shutdown detected — recovering windows (§6.6)")
+
+        for record in saved.hiddenApps ?? [] {
+            if let app = NSRunningApplication(processIdentifier: record.pid),
+               record.bundleID == nil || app.bundleIdentifier == record.bundleID {
+                app.unhide()
+            } else if let bundleID = record.bundleID {
+                // After a reboot the pid was recycled; fall back to bundle id.
+                for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+                    app.unhide()
+                }
+            }
+        }
+
+        let displayFrames = displays.map(\.frame)
+        // Restore targets: recorded frames that are visible on the *current*
+        // arrangement. A record whose own frame looks stashed (or sat on a
+        // display that's gone) can't serve as a target; those windows get a
+        // centered fallback instead.
+        var candidates: [String: [StateStore.WindowRecord]] = [:]
+        var recordedBundles: Set<String> = []
+        for record in saved.windows {
+            guard let bundleID = record.bundleID else { continue }
+            recordedBundles.insert(bundleID)
+            if !StashPlanner.looksStashed(record.frame, displays: displayFrames) {
+                candidates[bundleID, default: []].append(record)
+            }
+        }
+        guard !recordedBundles.isEmpty else { return }
+        let visible = displays.first?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let targets: [(pid: pid_t, bundleID: String)] = NSWorkspace.shared.runningApplications
+            .compactMap { app in
+                guard app.activationPolicy == .regular,
+                      let bundleID = app.bundleIdentifier,
+                      recordedBundles.contains(bundleID) else { return nil }
+                return (app.processIdentifier, bundleID)
+            }
+        guard !targets.isEmpty else { return }
+
+        // Off the MainActor (§6.3, invariant 3). Every probe below is a
+        // synchronous AX round trip, and a crash relaunch is precisely when
+        // other apps are also restoring and slow to answer: run this inline
+        // and `apps x windows x 5 x 100 ms` of it lands on the main thread,
+        // freezing the menu bar, the permission gate and the event tap. One
+        // task per app so a wedged app delays only its own recovery.
+        for (pid, bundleID) in targets {
+            let pool = candidates[bundleID] ?? []
+            Task.detached {
+                var pool = pool
+                let axApp = AXElement.application(pid: pid)
+                axApp.setMessagingTimeout(0.1)
+                for element in axApp.elements(kAXWindowsAttribute) {
+                    element.setMessagingTimeout(0.1)
+                    guard let frame = element.frame,
+                          StashPlanner.looksStashed(frame, displays: displayFrames) else { continue }
+                    // A hidden app whose windows sit at stash coordinates is
+                    // our hide with near-certainty — the hide raced the
+                    // debounced persist and went unrecorded, so the
+                    // `hiddenApps` loop above missed it. Unhide before
+                    // placing (§4.4), or the recovered windows come back
+                    // invisible and the layout keeps a hole (invariant 1).
+                    await MainActor.run {
+                        let app = NSRunningApplication(processIdentifier: pid)
+                        if app?.isHidden == true { app?.unhide() }
+                    }
+                    let title = element.string(kAXTitleAttribute) ?? ""
+                    var target = CGRect(
+                        x: visible.midX - frame.width / 2,
+                        y: visible.midY - frame.height / 2,
+                        width: frame.width, height: frame.height
+                    )
+                    if !pool.isEmpty {
+                        // Exact title first, then FIFO per bundle — the same
+                        // heuristic profile matching uses (§4.5).
+                        let idx = pool.firstIndex { $0.title == title } ?? 0
+                        target = pool.remove(at: idx).frame
+                    }
+                    element.set(kAXPositionAttribute, point: target.origin)
+                    element.set(kAXSizeAttribute, size: target.size)
+                }
+            }
+        }
+    }
+
     /// Orderly shutdown: every window returns to the exact frame it had
     /// before Zephr managed it, apps unhidden, snapshot marked clean.
-    /// Synchronous AX on purpose — we're exiting.
+    /// Synchronous AX on purpose — we're exiting. Invisible windows (stashed
+    /// or minimized) go first: single-instance takeover force-kills us after
+    /// a grace period, and a truncated pass must still have rescued the
+    /// windows nobody can see (§6.6, invariant 1). Minimized windows get
+    /// their frame written too — un-minimizing later must not reveal a
+    /// window parked at stash coordinates with no manager running. Short
+    /// per-element timeouts keep the whole pass bounded (§6.3).
     func shutdownRestore() {
         for pid in hiddenApps {
             NSRunningApplication(processIdentifier: pid)?.unhide()
         }
         hiddenApps.removeAll()
-        for mw in windows.values where !mw.minimized && !mw.fullscreen {
+        let ordered = windows.values.sorted { a, b in
+            (isVisible(a.id) ? 1 : 0) < (isVisible(b.id) ? 1 : 0)
+        }
+        for mw in ordered where !mw.fullscreen {
+            mw.element.setMessagingTimeout(0.1)
             mw.element.set(kAXPositionAttribute, point: mw.originalFrame.origin)
             mw.element.set(kAXSizeAttribute, size: mw.originalFrame.size)
         }
-        stateStore.saveNow(windows: snapshotRecords(), profiles: profiles, clean: true)
+        stateStore.saveNow(windows: snapshotRecords(), profiles: profiles, hiddenApps: [], clean: true)
     }
 
     // MARK: - App attach/detach
@@ -180,6 +340,11 @@ final class TilingEngine {
         let pid = app.processIdentifier
         guard pid != ProcessInfo.processInfo.processIdentifier,
               app.activationPolicy == .regular,
+              // The launch path delays 500 ms before attaching; an app that
+              // died in that window already fired its termination
+              // notification, and attaching now would leak a connection the
+              // audit polls forever (§6.4).
+              !app.isTerminated,
               connections[pid] == nil else { return }
         if let bundleID = app.bundleIdentifier,
            rules.action(bundleID: bundleID, title: nil) == .ignore {
@@ -193,6 +358,9 @@ final class TilingEngine {
             for element in elements {
                 await self.adopt(element: element, pid: pid)
             }
+            // Adopting an app the user had already hidden would tile windows
+            // that are not on screen — the same hole, just created at launch.
+            if app.isHidden { self.noteAppHidden(pid: pid) }
         }
     }
 
@@ -200,6 +368,11 @@ final class TilingEngine {
         guard connections.removeValue(forKey: pid) != nil else { return }
         hub.unwatchApp(pid: pid)
         hiddenApps.remove(pid)
+        unresponsivePids.remove(pid)
+        // An in-flight audit's task discards its own stale result (it
+        // checks connection identity); the in-flight marker is cleared
+        // here so a re-attached pid can be audited again immediately.
+        auditsInFlight.remove(pid)
         let ids = windows.values.filter { $0.pid == pid }.map(\.id)
         for id in ids {
             windows.removeValue(forKey: id)
@@ -253,6 +426,7 @@ final class TilingEngine {
         // Native fullscreen stays out of the tree but is tracked so it shows
         // in the palette (marked) and re-tiles when it leaves fullscreen (§6.4).
         if snap.fullscreen {
+            lastAdoptionAt = ContinuousClock.now
             windows[id] = ManagedWindow(
                 id: id, pid: pid, bundleID: conn.bundleID, element: element,
                 title: snap.title, floating: false, fullscreen: true,
@@ -288,12 +462,23 @@ final class TilingEngine {
 
         var workspaceID: Int?
         if case .workspace(let n) = ruleAction { workspaceID = n }
+        if workspaceID == nil, let pending = pendingRestore, let bundleID = conn.bundleID {
+            // Session restore (§4.5): while the launch profile is pending,
+            // late-adopted windows are placed from it — on a reboot most
+            // apps adopt long after startup, and falling back to the active
+            // workspace would scatter the layout the quiesce pass restores.
+            workspaceID = Self.profileWorkspace(
+                for: WindowFingerprint(bundleID: bundleID, title: snap.title),
+                in: pending
+            )
+        }
         if workspaceID == nil {
             workspaceID = displayContaining(snap.frame.center).map {
                 model.activeWorkspace(on: $0.id).id
             }
         }
 
+        lastAdoptionAt = ContinuousClock.now
         windows[id] = ManagedWindow(
             id: id, pid: pid, bundleID: conn.bundleID, element: element,
             title: snap.title, floating: floats, minimized: snap.minimized,
@@ -338,18 +523,54 @@ final class TilingEngine {
             }
 
         case .windowMiniaturized(let id):
-            guard windows[id] != nil else { return }
-            windows[id]?.minimized = true
-            model.removeWindow(id)
-            applyAll()
-            focusModelFallback()
+            noteMinimized(id)
 
         case .windowDeminiaturized(let id):
-            guard let mw = windows[id], mw.minimized else { return }
-            windows[id]?.minimized = false
-            model.insertWindow(id, floating: mw.floating, frame: mw.lastVisibleFrame)
-            applyAll()
+            noteDeminiaturized(id)
         }
+    }
+
+    /// Minimize transitions, shared by the notification handlers and the
+    /// audit's minimized diff (§6.4). Leaving the tree records the workspace
+    /// the window came from so restoring — even days later from the Dock —
+    /// puts it back there, not wherever focus happens to be (§4.4).
+    private func noteMinimized(_ id: WindowID) {
+        guard windows[id]?.minimized == false else { return }
+        windows[id]?.suspendedWorkspace = model.workspace(containing: id)?.id
+        windows[id]?.minimized = true
+        model.removeWindow(id)
+        applyAll()
+        focusModelFallback()
+    }
+
+    /// The user hid an app. Withdraw its windows from the layout exactly
+    /// as minimizing each one would, so the tiles close instead of holding
+    /// space for windows that are not on screen.
+    ///
+    /// Zephr's own stash-hides are excluded: those windows are already
+    /// off-screen by design and belong to workspaces the user has simply
+    /// switched away from.
+    func noteAppHidden(pid: pid_t) {
+        guard !hiddenApps.contains(pid) else { return }
+        for (id, mw) in windows where mw.pid == pid && !mw.minimized {
+            windows[id]?.appHidden = true
+            noteMinimized(id)
+        }
+    }
+
+    func noteAppUnhidden(pid: pid_t) {
+        for (id, mw) in windows where mw.pid == pid && mw.appHidden {
+            windows[id]?.appHidden = false
+            noteDeminiaturized(id)
+        }
+    }
+
+    private func noteDeminiaturized(_ id: WindowID) {
+        guard let mw = windows[id], mw.minimized else { return }
+        windows[id]?.minimized = false
+        windows[id]?.suspendedWorkspace = nil
+        model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
+        applyAll()
     }
 
     private func removeWindow(_ id: WindowID) {
@@ -357,6 +578,12 @@ final class TilingEngine {
         let wasFocused = model.focusedWindow == id
         model.removeWindow(id)
         pendingWrites.removeValue(forKey: id)
+        // Drop the window's six AXObserver registrations too. `unregister`
+        // only clears the AX connection's map; without this the observer keeps
+        // a registration (and a dead AXUIElement) per notification for the
+        // app's whole lifetime — 1200 stale entries after 200 window closes,
+        // against the §6.3 RSS budget.
+        hub.unwatchWindow(pid: mw.pid, element: mw.element)
         if let conn = connections[mw.pid] {
             Task { await conn.unregister(id) }
         }
@@ -378,6 +605,12 @@ final class TilingEngine {
         guard let mw = windows[id], !mw.minimized,
               let ws = model.workspace(containing: id) else { return }
 
+        // Stashed windows have nothing to track (§4.4): a late echo of our
+        // own stash write must never be recorded as the window's real frame —
+        // for a float that would bake the off-screen position into the model
+        // and, via the next capture, into the saved profile (invariant 1).
+        guard isVisible(id) else { return }
+
         if ws.isFloating(id) {
             // Track the float's new frame as its truth.
             guard let conn = connections[mw.pid] else { return }
@@ -391,14 +624,16 @@ final class TilingEngine {
             return
         }
 
-        guard isVisible(id) else { return }
-
         if NSEvent.pressedMouseButtons & 1 != 0 {
             // Title-bar drag on a tiled window: float it for the drag and
-            // offer drop targets to re-tile (§4.3).
+            // offer drop targets to re-tile (§4.3) — but only if the cursor
+            // is actually on this window. Apps resize their own windows
+            // during unrelated drags, and floating those would pop the
+            // wrong window out and let dragEnded retile it (§6.4).
             guard let conn = connections[mw.pid] else { return }
             Task {
                 guard let snap = await conn.snapshot(of: id) else { return }
+                guard let cursor = self.cursorInGlobalCG(), snap.frame.contains(cursor) else { return }
                 guard let ws = self.model.workspace(containing: id), !ws.isFloating(id) else { return }
                 _ = ws.toggleFloat(id, defaultFrame: snap.frame)
                 ws.setFloatingFrame(id, frame: snap.frame)
@@ -418,19 +653,45 @@ final class TilingEngine {
     var dropOverlay: DropZoneOverlay?
     var gapResizer: GapResizeController?
     private var dragSession: (id: WindowID, monitors: [Any], target: (WindowID, Direction)?)?
+    private var dragWatchdog: Task<Void, Never>?
 
     private func beginDragSession(_ id: WindowID) {
         guard dragSession == nil else { return }
         // The mouse may already be up if the drag was a flick; stay floating.
         guard NSEvent.pressedMouseButtons & 1 != 0 else { return }
         var monitors: [Any] = []
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged], handler: { _ in
-            MainActor.assumeIsolated { TilingEngine.shared?.dragMoved() }
-        }) { monitors.append(m) }
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { _ in
-            MainActor.assumeIsolated { TilingEngine.shared?.dragEnded() }
-        }) { monitors.append(m) }
+        // Global monitors never see this process's own events, so a drag of a
+        // tutorial practice window would never deliver its mouse-up and would
+        // strand the session — which `guard dragSession == nil` then turns
+        // into "drag-to-retile is dead until relaunch". Watch locally too.
+        for mask in [NSEvent.EventTypeMask.leftMouseDragged, .leftMouseUp] {
+            let ended = mask == .leftMouseUp
+            if let m = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { _ in
+                MainActor.assumeIsolated {
+                    ended ? TilingEngine.shared?.dragEnded() : TilingEngine.shared?.dragMoved()
+                }
+            }) { monitors.append(m) }
+            if let m = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { event in
+                MainActor.assumeIsolated {
+                    ended ? TilingEngine.shared?.dragEnded() : TilingEngine.shared?.dragMoved()
+                }
+                return event
+            }) { monitors.append(m) }
+        }
         dragSession = (id, monitors, nil)
+
+        // The button can be released in the window between the check above and
+        // the monitors being installed — exactly the flick the comment warns
+        // about — in which case no mouse-up is ever delivered. Re-check now,
+        // and keep a watchdog for anything else that swallows the event.
+        guard NSEvent.pressedMouseButtons & 1 != 0 else { dragEnded(); return }
+        dragWatchdog = Task { [weak self] in
+            while !Task.isCancelled, NSEvent.pressedMouseButtons & 1 != 0 {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            guard !Task.isCancelled else { return }
+            self?.dragEnded()
+        }
     }
 
     private func cursorInGlobalCG() -> CGPoint? {
@@ -471,6 +732,8 @@ final class TilingEngine {
 
     private func dragEnded() {
         guard let session = dragSession else { return }
+        dragWatchdog?.cancel()
+        dragWatchdog = nil
         for monitor in session.monitors { NSEvent.removeMonitor(monitor) }
         dropOverlay?.update(frame: nil)
         dragSession = nil
@@ -600,6 +863,12 @@ final class TilingEngine {
             for d in affected { applyDisplay(d) }
             if let target = model.focusedWorkspace?.focusedWindow ?? model.focusedWorkspace?.fallbackFocus() {
                 focusWindow(target)
+            } else {
+                // Empty workspace (§4.4): take focus away from the app we
+                // just stashed — otherwise keystrokes keep editing a now
+                // invisible document. Zephr has no regular windows, so
+                // activating ourselves parks the keyboard safely.
+                NSRunningApplication.current.activate()
             }
             syncAppState()
 
@@ -654,7 +923,11 @@ final class TilingEngine {
 
         case .rescueWindows:
             guard let current = model.focusedWorkspace?.id else { return }
-            for pid in hiddenApps {
+            // Rescue means *everything* back (§4.4, invariant 1): unhide
+            // every app with a managed window, not just the ones we think we
+            // hid — after a crash `hiddenApps` starts empty while apps are
+            // still hidden.
+            for pid in Set(windows.values.map(\.pid)) {
                 NSRunningApplication(processIdentifier: pid)?.unhide()
             }
             hiddenApps.removeAll()
@@ -703,9 +976,18 @@ final class TilingEngine {
             for mw in windows.values where !isVisible(mw.id) && !mw.minimized {
                 perApp[mw.pid, default: []].append((mw.id, mw.lastVisibleFrame))
             }
+            let now = ContinuousClock.now
             for (pid, batch) in perApp {
                 guard let conn = connections[pid] else { continue }
-                Task { _ = await conn.applyFrames(batch) }
+                for (id, frame) in batch { pendingWrites[id] = (frame, now) }
+                // Record the results like every other write path. Dropping
+                // them leaves `lastAppliedFrame` holding the stash frame the
+                // window no longer occupies, so on resume the no-op filter
+                // sees the stash target as already applied and skips it —
+                // every inactive workspace's windows stay piled on top of
+                // the active layout, and the audit can't correct it because
+                // its drift check only looks at visible windows.
+                Task { self.noteWriteResults(await conn.applyFrames(batch)) }
             }
             focusBorder?.update(frame: nil)
             gapResizer?.clear()
@@ -733,7 +1015,7 @@ final class TilingEngine {
                 Task {
                     await conn.raise(id)
                     NSRunningApplication(processIdentifier: mw.pid)?
-                        .activate(options: [.activateIgnoringOtherApps])
+                        .activate()
                 }
             }
             return
@@ -773,18 +1055,37 @@ final class TilingEngine {
     private func noteFocused(_ id: WindowID) {
         guard windows[id] != nil else { return }
         model.noteFocused(id)
+        reapplyForFocusDependentLayout(id)
         syncAppState()
     }
 
     private func focusWindow(_ id: WindowID) {
         guard let mw = windows[id], let conn = connections[mw.pid] else { return }
         model.noteFocused(id)
+        reapplyForFocusDependentLayout(id)
         syncAppState()
         Task {
             await conn.raise(id)
             NSRunningApplication(processIdentifier: mw.pid)?
-                .activate(options: [.activateIgnoringOtherApps])
+                .activate()
         }
+    }
+
+    /// Accordion and monocle solve differently depending on focus: the
+    /// accordion expands `lastFocusedIndex`, monocle maximizes the focused
+    /// window. Focus changes must re-apply those layouts or the newly
+    /// focused window keeps its collapsed sliver (§4.3); write coalescing
+    /// makes the plain-tiles no-op case free (§6.3).
+    private func reapplyForFocusDependentLayout(_ id: WindowID) {
+        guard let ws = model.workspace(containing: id),
+              let home = ws.homeDisplay else { return }
+        var focusDependent = ws.monocle
+        var node = ws.node(for: id)?.parent
+        while !focusDependent, let n = node {
+            if n.layout == .accordion { focusDependent = true }
+            node = n.parent
+        }
+        if focusDependent { applyDisplay(home) }
     }
 
     private func focusModelFallback() {
@@ -883,12 +1184,29 @@ final class TilingEngine {
             }
             let raiseList = raises[pid] ?? []
             guard !work.isEmpty || !raiseList.isEmpty else { continue }
+            // Stamp at issue so echoes arriving mid-write are suppressed (and
+            // the drag heuristic can't fire on our own writes); the stamp is
+            // refreshed on completion in `noteWriteResults` so the window
+            // covers slow apps whose echo lands over a second after issue.
             let now = ContinuousClock.now
             for (id, frame) in work { pendingWrites[id] = (frame, now) }
             Task {
                 let result = await conn.applyFrames(work)
                 for id in raiseList { await conn.raise(id) }
                 self.noteWriteResults(result)
+                // Short batch = aborted batch (§6.3): `applyFrames` stops
+                // at the first messaging timeout, so anything past the
+                // abort was never written. Retrying immediately would just
+                // burn the busy app's queue — instead mark the pid
+                // unresponsive so the first clean audit re-applies its
+                // displays (§6.4 convergence). Without this, an aborted
+                // stash batch leaves windows sitting on top of the wrong
+                // workspace indefinitely on an idle desktop. Skip a pid
+                // that detached mid-write: with no connection to audit,
+                // the marker could never be cleared.
+                if result.applied.count < work.count, self.connections[pid] === conn {
+                    self.unresponsivePids.insert(pid)
+                }
             }
         }
 
@@ -897,13 +1215,42 @@ final class TilingEngine {
     }
 
     private func noteWriteResults(_ result: AppAXConnection.WriteResult) {
-        for (id, frame) in result.applied {
-            windows[id]?.lastAppliedFrame = frame
+        let now = ContinuousClock.now
+        for (id, actual) in result.applied {
+            // The window may have been removed while the write was in
+            // flight; don't resurrect its bookkeeping.
+            guard windows[id] != nil else { continue }
+            let target = pendingWrites[id]?.frame
+            // Convergence for snapping apps (§6.3): Terminal-style grids
+            // settle a few points off target and stay there. Read-back
+            // within tolerance counts as applied — record the *target* so
+            // the work filter skips the window next apply, and the settled
+            // frame so the audit doesn't call it drift. (Tolerance matches
+            // the veto threshold in `applyFrames`.)
+            if let target, actual.approximatelyEquals(target, tolerance: 10) {
+                windows[id]?.lastAppliedFrame = target
+            } else {
+                windows[id]?.lastAppliedFrame = actual
+            }
+            windows[id]?.lastSettledFrame = actual
+            // Echo suppression runs from write *completion* — stamping only
+            // at issue let a slow app's late stash echo through, which then
+            // overwrote a float's model frame with off-screen coordinates.
+            pendingWrites[id] = (target ?? actual, now)
         }
         // Frame vetoes (§6.4): apps that clamp their windows get floated
         // after two strikes instead of fighting forever — and the rule is
         // learned so next launch floats them immediately.
         for id in result.vetoed {
+            // A veto only means something when we tried to place the window
+            // *on screen*: stash targets are >99% off-screen by design
+            // (`StashPlanner.sliver` is 1 pt), so an app that re-clamps an
+            // off-screen origin "vetoes" every hide by hundreds of points —
+            // striking on that would float the window out of the tree and
+            // persist a permanent `float` rule from an operation that says
+            // nothing about whether the app can be tiled. Do not simplify
+            // this guard away.
+            guard isVisible(id) else { continue }
             guard var mw = windows[id], !mw.floating else { continue }
             mw.vetoStrikes += 1
             windows[id] = mw
@@ -913,38 +1260,91 @@ final class TilingEngine {
                 windows[id]?.floating = true
                 applyAll()
                 if let bundleID = mw.bundleID {
-                    onRuleLearned?(bundleID, mw.title)
+                    learnFloatRule(pid: mw.pid, bundleID: bundleID)
                 }
             }
         }
     }
 
-    /// Fired when a veto teaches us an app needs to float (§6.4 "learn the
-    /// rule") — the app layer persists it to config.
-    var onRuleLearned: ((String, String) -> Void)?
+    /// Persists "this app's windows resist tiling", but only once *every*
+    /// managed window of the app has proven it (§6.4 "learn the rule").
+    ///
+    /// The rule deliberately carries no title. A veto says the app clamps
+    /// the frames we write, which is a property of the app, not of the words
+    /// in its title bar — and a regex anchored on whatever title happened to
+    /// be showing (a browser's unread count, a terminal's progress spinner)
+    /// can never match again. Such a rule reads as learned while doing
+    /// nothing, which is worse than no rule at all. So a multi-window app
+    /// where only one window fights keeps floating that window in-session
+    /// and writes nothing to config.
+    private func learnFloatRule(pid: pid_t, bundleID: String) {
+        let siblings = windows.values.filter { $0.pid == pid && !$0.minimized && !$0.fullscreen }
+        guard !siblings.isEmpty, siblings.allSatisfy({ $0.vetoStrikes >= 2 }) else { return }
+        onRuleLearned?(bundleID)
+    }
 
-    /// The Mission Control hybrid (§4.4): when every managed window of an app
-    /// is stashed, hide the app so nothing lingers in Mission Control.
+    /// Fired when the app layer should persist a learned float rule.
+    var onRuleLearned: ((String) -> Void)?
+
+    /// The Mission Control hybrid (§4.4): when every window of an app is a
+    /// managed, stashed window, hide the app so nothing lingers in Mission
+    /// Control. Hiding is per-app, so a pid with any window we do *not*
+    /// manage (title-ignored utility windows) or with a native-fullscreen
+    /// window is never hidden — and Zephr never hides itself (the tutorial's
+    /// practice windows are managed windows of our own pid).
     private func updateAppHiding() {
-        var byPid: [pid_t: (total: Int, visible: Int)] = [:]
+        var byPid: [pid_t: (total: Int, visible: Int, exempt: Int)] = [:]
         for mw in windows.values where !mw.minimized {
-            var entry = byPid[mw.pid] ?? (0, 0)
+            var entry = byPid[mw.pid] ?? (0, 0, 0)
             entry.total += 1
             if isVisible(mw.id) { entry.visible += 1 }
+            if mw.fullscreen { entry.exempt += 1 }
             byPid[mw.pid] = entry
         }
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let selfPid = pid_t(ProcessInfo.processInfo.processIdentifier)
         for (pid, counts) in byPid {
-            if counts.total > 0 && counts.visible == 0 {
-                if !hiddenApps.contains(pid), pid != frontmost,
-                   let app = NSRunningApplication(processIdentifier: pid), !app.isHidden {
-                    app.hide()
-                    hiddenApps.insert(pid)
-                }
+            if counts.total > 0 && counts.visible == 0 && counts.exempt == 0 {
+                guard pid != selfPid, pid != frontmost, !hiddenApps.contains(pid),
+                      let app = NSRunningApplication(processIdentifier: pid), !app.isHidden
+                else { continue }
+                maybeHideApp(pid)
             } else if counts.visible > 0 && hiddenApps.contains(pid) {
                 NSRunningApplication(processIdentifier: pid)?.unhide()
                 hiddenApps.remove(pid)
             }
+        }
+    }
+
+    /// Confirms with the app's actor that *every* live window of the pid is
+    /// one we manage before hiding it (§4.4) — an unmanaged window must stay
+    /// visible, and hiding the app would take it too.
+    private func maybeHideApp(_ pid: pid_t) {
+        guard let conn = connections[pid] else { return }
+        Task {
+            let elements = await conn.listWindows()
+            // No evidence (degraded app, empty listing) — don't hide blind.
+            guard !elements.isEmpty else { return }
+            for element in elements {
+                guard let id = await conn.id(for: element), self.windows[id] != nil else { return }
+            }
+            // Re-check on the main actor: state may have moved during the awaits.
+            guard !self.hiddenApps.contains(pid),
+                  pid != NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                  let app = NSRunningApplication(processIdentifier: pid),
+                  !app.isHidden, !app.isTerminated else { return }
+            let managed = self.windows.values.filter { $0.pid == pid && !$0.minimized }
+            guard !managed.isEmpty,
+                  managed.allSatisfy({ !$0.fullscreen && !self.isVisible($0.id) }) else { return }
+            app.hide()
+            self.hiddenApps.insert(pid)
+            // Record the hide now (§6.6): crash recovery unhides only
+            // *recorded* apps, and the enclosing apply's persist already
+            // ran before this task's awaits finished. A crash before the
+            // next incidental persist would otherwise leave the app hidden
+            // while its windows tile into the visible workspace — a hole
+            // in the layout only `leader w` could fill.
+            self.persistSoon()
         }
     }
 
@@ -966,10 +1366,21 @@ final class TilingEngine {
         guard !fresh.isEmpty else { return }
         displays = fresh
 
+        let fingerprint = ProfileEngine.fingerprint(currentSlots())
+        guard profileCaptureEnabled else {
+            // Startup hasn't settled yet (§4.5): swap the pending profile
+            // for the new arrangement instead of applying mid-adoption —
+            // the quiesce task consumes it once apps stop appearing.
+            pendingRestore = profile(matching: fingerprint)
+            model.syncDisplays(fresh.map(\.id))
+            applyAll()
+            onEvent?("display_changed", ["displays": "\(fresh.count)"])
+            return
+        }
+
         // Known arrangement → restore it exactly; unknown → migrate in
         // stable order and start recording the new profile (§4.5).
-        let fingerprint = ProfileEngine.fingerprint(currentSlots())
-        if let profile = profiles[fingerprint] {
+        if let profile = profile(matching: fingerprint) {
             applyProfile(profile)
             Self.log.info("display change: restored profile \(fingerprint)")
         } else {
@@ -983,7 +1394,41 @@ final class TilingEngine {
     // MARK: - Profiles & session restore (§4.5)
 
     private func currentSlots() -> [DisplaySlot] {
-        displays.map { DisplaySlot(id: $0.id, frame: $0.frame) }
+        displays.map { DisplaySlot(id: $0.id, frame: $0.frame, identity: Self.panelIdentity($0.id)) }
+    }
+
+    /// The physical panel behind a display, stable across reboots and hotplug
+    /// (§4.5 "identifier"). `CGDirectDisplayID` churns, so it is deliberately
+    /// excluded; vendor/model/serial do not. Two same-resolution monitors at
+    /// two sites would otherwise share one profile — docking at the second
+    /// site restores the first site's layout and then overwrites it.
+    /// Profiles saved before panel identity joined the fingerprint are keyed by
+    /// geometry alone. Fall back to that key once and re-key the profile, so
+    /// upgrading preserves a user's saved layouts instead of silently
+    /// resetting every one of them (§4.5).
+    private func profile(matching fingerprint: String) -> ModelSnapshot? {
+        if let profile = profiles[fingerprint] { return profile }
+        let legacyKey = ProfileEngine.fingerprint(
+            displays.map { DisplaySlot(id: $0.id, frame: $0.frame) }
+        )
+        guard legacyKey != fingerprint,
+              var migrated = profiles.removeValue(forKey: legacyKey) else { return nil }
+        migrated.fingerprint = fingerprint
+        profiles[fingerprint] = migrated
+        Self.log.info("migrated profile \(legacyKey) → \(fingerprint)")
+        persistSoon()
+        return migrated
+    }
+
+    private static func panelIdentity(_ id: DisplayID) -> String? {
+        let display = CGDirectDisplayID(id.raw)
+        let vendor = CGDisplayVendorNumber(display)
+        let model = CGDisplayModelNumber(display)
+        let serial = CGDisplaySerialNumber(display)
+        // All-zero means the panel didn't report EDID; fall back to
+        // geometry-only rather than collapsing every such display together.
+        guard vendor | model | serial != 0 else { return nil }
+        return "\(vendor)-\(model)-\(serial)\(CGDisplayIsBuiltin(display) != 0 ? "-b" : "")"
     }
 
     private func windowFingerprint(_ id: WindowID) -> WindowFingerprint? {
@@ -991,10 +1436,17 @@ final class TilingEngine {
         return WindowFingerprint(bundleID: bundleID, title: mw.title)
     }
 
+    /// Live windows eligible for profile matching: minimized and native
+    /// fullscreen stay out — the tree must never claim them (§6.4), and a
+    /// restore that tiles a fullscreen Safari gets vetoed into a bogus
+    /// permanent float rule.
     private func liveFingerprints() -> [WindowID: WindowFingerprint] {
         var live: [WindowID: WindowFingerprint] = [:]
-        for id in windows.keys where !(windows[id]?.minimized ?? true) {
-            live[id] = windowFingerprint(id)
+        for (id, mw) in windows where !mw.minimized && !mw.fullscreen {
+            // `if let`, deliberately: assigning a nil Optional through a
+            // Dictionary subscript *removes* the key, which silently dropped
+            // windows without a bundle id from matching (invariant 1).
+            if let fp = windowFingerprint(id) { live[id] = fp }
         }
         return live
     }
@@ -1006,15 +1458,36 @@ final class TilingEngine {
             slots: currentSlots(),
             live: liveFingerprints()
         )
-        // Windows the profile doesn't know join their display's workspace.
+        // Everything `apply` didn't place — windows the profile doesn't
+        // know, plus any previously managed window it couldn't match —
+        // rejoins its display's workspace; dropping one loses it
+        // (invariant 1). Minimized/fullscreen windows stay out of the tree
+        // (§6.4); their restore paths reinsert them.
         for id in unplaced {
-            guard let mw = windows[id] else { continue }
+            guard let mw = windows[id], !mw.minimized, !mw.fullscreen else { continue }
             let display = displayContaining(mw.lastVisibleFrame.center)
             let wsID = display.map { model.activeWorkspace(on: $0.id).id }
             model.insertWindow(id, workspace: wsID, floating: mw.floating, frame: mw.lastVisibleFrame)
         }
         applyAll()
         focusModelFallback()
+    }
+
+    /// Which workspace the pending profile recorded for a window matching
+    /// `fp` — exact (bundleID, title) first, then bundleID-only, mirroring
+    /// `ProfileEngine.apply`'s heuristics (§4.5). Only a hint: the quiesce
+    /// pass re-applies the full profile with exact trees afterwards.
+    private static func profileWorkspace(for fp: WindowFingerprint, in snapshot: ModelSnapshot) -> Int? {
+        func contains(_ node: NodeSnapshot, _ index: Int) -> Bool {
+            node.window == index || node.children.contains { contains($0, index) }
+        }
+        guard let index = snapshot.windows.firstIndex(of: fp)
+            ?? snapshot.windows.firstIndex(where: { $0.bundleID == fp.bundleID })
+        else { return nil }
+        return snapshot.workspaces.first { ws in
+            ws.floats.contains { $0.window == index }
+                || (ws.root.map { contains($0, index) } ?? false)
+        }?.id
     }
 
     /// Settings → Profiles: stored arrangements with their window counts.
@@ -1026,14 +1499,16 @@ final class TilingEngine {
 
     func deleteProfile(_ fingerprint: String) {
         profiles.removeValue(forKey: fingerprint)
-        stateStore.save(windows: snapshotRecords(), profiles: profiles, clean: false)
+        stateStore.save(windows: snapshotRecords(), profiles: profiles, hiddenApps: hiddenAppRecords(), clean: false)
     }
 
     /// Reassembles the last session's layout for the current arrangement —
-    /// covers relaunches, crashes, and reboots alike.
+    /// covers relaunches, crashes, and reboots alike. Consumes the pending
+    /// profile (§4.5): after this, capture may resume.
     private func restoreSession() {
+        defer { pendingRestore = nil }
         let fingerprint = ProfileEngine.fingerprint(currentSlots())
-        guard let profile = profiles[fingerprint] else { return }
+        guard let profile = profile(matching: fingerprint) else { return }
         applyProfile(profile)
         Self.log.info("session restored for \(fingerprint)")
     }
@@ -1071,33 +1546,107 @@ final class TilingEngine {
         guard NSEvent.pressedMouseButtons == 0 else { return }
 
         for (pid, conn) in connections {
+            // Missed termination notification (§6.4): a pid that no longer
+            // maps to a running application is a dead connection — drop it
+            // instead of auditing it forever.
+            guard NSRunningApplication(processIdentifier: pid) != nil else {
+                detachApp(pid: pid)
+                continue
+            }
+            // One audit in flight per pid (§6.3): a slow-but-not-timing-out
+            // app must not pile up queued audits faster than they drain.
+            guard !auditsInFlight.contains(pid) else { continue }
+            auditsInFlight.insert(pid)
             Task {
                 let result = await conn.audit()
+                // The pid may have detached — or detached and re-attached —
+                // while the audit was in flight; force-quitting a hung app
+                // is exactly that path. Discard a stale result wholesale:
+                // it would re-insert the pid into `unresponsivePids` after
+                // `detachApp` cleared it, and with no connection left to
+                // audit, nothing could ever clear it again — silently
+                // freezing profile capture (§4.5) for the session.
+                guard self.connections[pid] === conn else { return }
+                self.auditsInFlight.remove(pid)
                 self.handleAudit(pid: pid, result: result)
             }
         }
     }
 
     private func handleAudit(pid: pid_t, result: AppAXConnection.AuditResult) {
-        for id in result.dead {
+        // §6.3 anti-stall contract: a momentarily busy app reports windows
+        // as `unresponsive`, not dead. They keep their model membership and
+        // cached geometry — purging them destroys workspace assignments and
+        // strands stashed windows off-screen where no rescue can find them
+        // (invariant 1) — and none of the reconciliation below may read the
+        // *absence* of data about them as a state change.
+        if result.unresponsive.isEmpty {
+            if unresponsivePids.remove(pid) != nil {
+                // Unresponsive → responsive edge (§6.4 convergence): while
+                // the pid was busy, `applyFrames` may have aborted a batch
+                // mid-way (anti-stall, §6.3), and nothing else re-drives
+                // the unwritten frames — the drift check below cannot see
+                // them (a window that missed its stash write isn't visible,
+                // and a visible one still matches its old
+                // `lastAppliedFrame`). Re-apply every display hosting one
+                // of the pid's windows; the no-op filter in `applyDisplay`
+                // re-issues only frames that never landed.
+                var hosts: Set<DisplayID> = []
+                for mw in windows.values where mw.pid == pid {
+                    if let home = model.workspace(containing: mw.id)?.homeDisplay {
+                        hosts.insert(home)
+                    }
+                }
+                for display in hosts { scheduleReapply(display) }
+            }
+        } else {
+            unresponsivePids.insert(pid)
+        }
+
+        for id in result.dead where !result.unresponsive.contains(id) {
             removeWindow(id)
         }
         for element in result.unknown {
             Task { await self.adopt(element: element, pid: pid) }
         }
 
+        // Missed miniaturize/deminiaturize notifications (§6.4): drive the
+        // same transitions as the handlers, or the window stays excluded
+        // from the palette and every apply forever. A window whose
+        // attribute did not answer is absent from the map and left alone —
+        // guessing "not minimized" would hand it a tile it cannot occupy.
+        for (id, mw) in windows where mw.pid == pid && !result.unresponsive.contains(id) {
+            // A ⌘H-hidden window still answers `kAXMinimized` with false;
+            // its withdrawal is ours to track, not AX's to contradict.
+            guard !mw.appHidden else { continue }
+            guard let observedMinimized = result.minimized[id] else { continue }
+            if observedMinimized && !mw.minimized {
+                noteMinimized(id)
+            } else if !observedMinimized && mw.minimized {
+                noteDeminiaturized(id)
+            }
+        }
+
         // Native fullscreen transitions (§6.4): a window entering fullscreen
         // leaves the tree (never fight the green button); leaving fullscreen
-        // re-tiles it.
-        for (id, mw) in windows where mw.pid == pid && !mw.minimized {
-            let isFullscreen = result.fullscreen.contains(id)
+        // re-tiles it into the workspace it came from (§4.4).
+        for (id, mw) in windows where mw.pid == pid && !mw.minimized && !result.unresponsive.contains(id) {
+            guard let isFullscreen = result.fullscreen[id] else { continue }
             if isFullscreen && !mw.fullscreen {
+                windows[id]?.suspendedWorkspace = model.workspace(containing: id)?.id
                 windows[id]?.fullscreen = true
                 model.removeWindow(id)
                 applyAll()
             } else if !isFullscreen && mw.fullscreen {
                 windows[id]?.fullscreen = false
-                model.insertWindow(id, floating: mw.floating, frame: mw.lastVisibleFrame)
+                windows[id]?.suspendedWorkspace = nil
+                model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
+                applyAll()
+            } else if isFullscreen, model.workspace(containing: id) != nil {
+                // A fullscreen window must never sit in the tree — profile
+                // restore can re-insert one it matched (§6.4). Drop it from
+                // the model; it stays tracked for the palette.
+                model.removeWindow(id)
                 applyAll()
             }
         }
@@ -1108,9 +1657,14 @@ final class TilingEngine {
         var driftCount = 0
         for (id, actual) in result.frames {
             guard let mw = windows[id], !mw.floating, !mw.minimized,
+                  !result.unresponsive.contains(id),
                   isVisible(id),
                   let expected = mw.lastAppliedFrame,
-                  !actual.approximatelyEquals(expected, tolerance: 3) else { continue }
+                  !actual.approximatelyEquals(expected, tolerance: 3),
+                  // A snapping app parked where our last write settled is
+                  // converged, not drifting (§6.3).
+                  !(mw.lastSettledFrame?.approximatelyEquals(actual, tolerance: 3) ?? false)
+            else { continue }
             driftCount += 1
             if let home = model.workspace(containing: id)?.homeDisplay {
                 drifted.insert(home)
@@ -1125,20 +1679,34 @@ final class TilingEngine {
 
     private func snapshotRecords() -> [StateStore.WindowRecord] {
         windows.values.compactMap { mw in
-            guard let ws = model.workspace(containing: mw.id) else { return nil }
+            // Minimized windows sit outside the model but still need a
+            // record: crash recovery must know where a stashed-then-minimized
+            // window belongs when it resurfaces (§6.6, invariant 1).
+            guard !mw.fullscreen else { return nil }
+            let ws = model.workspace(containing: mw.id)
+            guard ws != nil || mw.minimized else { return nil }
             return StateStore.WindowRecord(
                 bundleID: mw.bundleID,
                 title: mw.title,
                 frame: mw.lastVisibleFrame,
-                workspace: ws.id,
-                floating: ws.isFloating(mw.id)
+                workspace: ws?.id ?? mw.suspendedWorkspace ?? 1,
+                floating: ws?.isFloating(mw.id) ?? mw.floating
             )
         }
     }
 
+    /// The apps Zephr itself currently hides, recorded so crash recovery can
+    /// unhide them (§6.6) — by pid within this boot, by bundle id after one.
+    private func hiddenAppRecords() -> [StateStore.HiddenApp] {
+        hiddenApps.map { StateStore.HiddenApp(pid: $0, bundleID: connections[$0]?.bundleID) }
+    }
+
     private func persistSoon() {
-        // Continuous profile recording (§4.5), gated until session restore
-        // has run so a half-adopted startup can't clobber a good profile.
+        // Continuous profile recording (§4.5), gated only until the pending
+        // launch profile is consumed. Capture reads the model and cached
+        // bundle/title metadata, never live AX, so an unresponsive app is
+        // no reason to skip it — skipping would strand session restore on a
+        // stale profile for as long as one app stays wedged.
         if profileCaptureEnabled, !windows.isEmpty {
             let snapshot = ProfileEngine.capture(
                 model: model,
@@ -1147,7 +1715,7 @@ final class TilingEngine {
             )
             profiles[snapshot.fingerprint] = snapshot
         }
-        stateStore.save(windows: snapshotRecords(), profiles: profiles, clean: false)
+        stateStore.save(windows: snapshotRecords(), profiles: profiles, hiddenApps: hiddenAppRecords(), clean: false)
     }
 
     private func syncAppState() {

@@ -38,7 +38,12 @@ actor AppAXConnection {
         // without pinning P-cores the way .userInteractive would (battery).
         self.queue = DispatchSerialQueue(label: "dev.zephr.ax.\(pid)", qos: .userInitiated)
         self.app = .application(pid: pid)
-        self.app.setMessagingTimeout(0.25)
+        // §6.3 deadlines. The process-global floor covers stray elements;
+        // the per-element set is still required for every element we message
+        // through, because per AXUIElement.h a timeout set on one element
+        // applies to that element only (see AXElement.globalTimeoutFloor).
+        _ = AXElement.globalTimeoutFloor
+        self.app.setMessagingTimeout(AXElement.messagingDeadline)
     }
 
     private var isDegraded: Bool {
@@ -66,6 +71,9 @@ actor AppAXConnection {
     /// Registers a window element, assigning a stable WindowID. IDs embed the
     /// pid so they stay unique process-wide with no shared allocator.
     func register(_ element: AXElement) -> (WindowID, WindowSnapshot)? {
+        // §6.3 deadline before the FIRST read: the timeout set on the app
+        // element does not cascade to this element (AXUIElement.h).
+        element.setMessagingTimeout(AXElement.messagingDeadline)
         if let existing = id(for: element) {
             return snapshot(windows[existing]!).map { (existing, $0) }
         }
@@ -73,7 +81,6 @@ actor AppAXConnection {
         guard let snap = snapshot(element) else { return nil }
         let id = WindowID(UInt64(UInt32(bitPattern: pid)) << 32 | nextSequence)
         nextSequence += 1
-        element.setMessagingTimeout(0.25)
         windows[id] = element
         return (id, snap)
     }
@@ -92,11 +99,28 @@ actor AppAXConnection {
 
     func listWindows() -> [AXElement] {
         guard !isDegraded else { return [] }
-        return app.elements(kAXWindowsAttribute)
+        let (err, value) = app.attributeResult(kAXWindowsAttribute)
+        if err == .cannotComplete {
+            noteTimeout()
+            return []
+        }
+        guard let items = value as? [AnyObject] else { return [] }
+        return items.compactMap {
+            guard CFGetTypeID($0) == AXUIElementGetTypeID() else { return nil }
+            let el = AXElement($0 as! AXUIElement)
+            // Fresh tokens run at the global default without this (§6.3).
+            el.setMessagingTimeout(AXElement.messagingDeadline)
+            return el
+        }
     }
 
     func snapshot(_ element: AXElement) -> WindowSnapshot? {
-        guard let frame = element.frame else { return nil }
+        guard let frame = element.frame else {
+            // Distinguish busy from gone (§6.3/§6.4): a timeout feeds the
+            // retry ladder; a dead element is plain nil.
+            if element.liveness == .unresponsive { noteTimeout() }
+            return nil
+        }
         return WindowSnapshot(
             title: element.string(kAXTitleAttribute) ?? "",
             role: element.string(kAXRoleAttribute),
@@ -115,7 +139,9 @@ actor AppAXConnection {
     }
 
     func focusedWindowElement() -> AXElement? {
-        app.element(kAXFocusedWindowAttribute)
+        guard let el = app.element(kAXFocusedWindowAttribute) else { return nil }
+        el.setMessagingTimeout(AXElement.messagingDeadline)   // §6.3
+        return el
     }
 
     // MARK: - Frame application
@@ -143,15 +169,31 @@ actor AppAXConnection {
             if hadEnhancedUI { app.set(enhancedKey, to: kCFBooleanTrue) }
         }
 
-        for (id, target) in batch {
+        var sawTimeout = false
+        batchLoop: for (id, target) in batch {
             guard let el = windows[id] else { continue }
-            guard el.isAlive else { continue }
+            switch el.liveness {
+            case .dead:
+                continue batchLoop
+            case .unresponsive:
+                // Messaging timeout: the app is busy, not gone (§6.3). Stop
+                // the batch — every further call would burn another 250 ms
+                // on this queue — and let the retry ladder re-apply later;
+                // unwritten windows keep their cached geometry.
+                sawTimeout = true
+                break batchLoop
+            case .alive:
+                break
+            }
             el.set(kAXPositionAttribute, point: target.origin)
             el.set(kAXSizeAttribute, size: target.size)
 
             guard var actual = el.frame else {
-                noteTimeout()
-                continue
+                if el.liveness == .unresponsive {
+                    sawTimeout = true
+                    break batchLoop
+                }
+                continue    // died mid-batch; the audit will purge it
             }
             if !actual.approximatelyEquals(target, tolerance: 2) {
                 // One corrective pass for apps that clamp on the first write.
@@ -161,65 +203,138 @@ actor AppAXConnection {
                 actual = el.frame ?? actual
             }
             result.applied[id] = actual
-            if abs(actual.width - target.width) > 10 || abs(actual.height - target.height) > 10 {
+            // A window that accepts the size but refuses to *move* is a veto
+            // too (§6.4 read-back veto) — position drift matters just as
+            // much, e.g. a window sitting at stash coordinates off-screen.
+            if abs(actual.width - target.width) > 10 || abs(actual.height - target.height) > 10
+                || abs(actual.origin.x - target.origin.x) > 10
+                || abs(actual.origin.y - target.origin.y) > 10 {
                 result.vetoed.insert(id)
             }
         }
-        noteSuccess()
+        // Only a clean batch resets the §6.3 ladder — an unconditional
+        // reset here would mean degraded state could never latch.
+        if sawTimeout {
+            noteTimeout()
+        } else {
+            noteSuccess()
+        }
         return result
     }
 
     /// Presses the window's close button (leader q / ⌃⌥Q).
     func closeWindow(_ id: WindowID) {
         guard let el = windows[id], !isDegraded else { return }
-        el.element(kAXCloseButtonAttribute)?.perform(kAXPressAction)
+        guard let button = el.element(kAXCloseButtonAttribute) else {
+            if el.liveness == .unresponsive { noteTimeout() }   // §6.3 ladder
+            return
+        }
+        button.setMessagingTimeout(AXElement.messagingDeadline)
+        button.perform(kAXPressAction)
     }
 
     /// Raises a window above its app siblings and marks it main.
     func raise(_ id: WindowID) {
         guard let el = windows[id], !isDegraded else { return }
-        el.set(kAXMainAttribute, to: kCFBooleanTrue)
-        el.perform(kAXRaiseAction)
+        let madeMain = el.set(kAXMainAttribute, to: kCFBooleanTrue)
+        let raised = el.perform(kAXRaiseAction)
+        if !madeMain, !raised, el.liveness == .unresponsive {
+            noteTimeout()   // §6.3 ladder
+        }
     }
 
     // MARK: - Audit (reconciliation input, §6.4)
 
     struct AuditResult: Sendable {
+        /// Confirmed dead (`kAXErrorInvalidUIElement` only, §6.4) — already
+        /// unregistered from this connection; the engine should remove them.
         var dead: [WindowID] = []
+        /// Windows whose state could not be verified this cycle because the
+        /// app timed out AX messaging or is degraded (§6.3). They are NOT
+        /// dead: they stay registered on this connection, and the caller
+        /// must keep them managed with cached geometry, drawing no
+        /// conclusions from their absence in `frames` / `minimized` /
+        /// `fullscreen`. A caller that ignores this field is still safe as
+        /// long as it only *removes* windows listed in `dead`.
+        var unresponsive: Set<WindowID> = []
         var unknown: [AXElement] = []
         var frames: [WindowID: CGRect] = [:]
-        var minimized: Set<WindowID> = []
-        var fullscreen: Set<WindowID> = []
+        /// Only windows whose attribute actually answered. A failed or
+        /// absent read must not read back as `false` — some toolkits post
+        /// the miniaturize notification without ever exposing the
+        /// attribute, and treating the gap as "not minimized" un-minimizes
+        /// the window in the model on the very next audit.
+        var minimized: [WindowID: Bool] = [:]
+        var fullscreen: [WindowID: Bool] = [:]
     }
 
     func audit() -> AuditResult {
         var result = AuditResult()
-        guard !isDegraded else { return result }
+        guard !isDegraded else {
+            // Degraded (§6.3): nothing gets verified this cycle; report
+            // every window unresponsive so the caller keeps cached state.
+            result.unresponsive = Set(windows.keys)
+            return result
+        }
 
+        var sawTimeout = false
         for (id, el) in windows {
-            guard el.isAlive else {
+            if sawTimeout {
+                // AX messaging is per-process: after one timeout, each
+                // further probe would burn another 250 ms. Report the rest
+                // unverified instead.
+                result.unresponsive.insert(id)
+                continue
+            }
+            switch el.liveness {
+            case .dead:
+                // Only kAXErrorInvalidUIElement purges the ghost (§6.4).
                 result.dead.append(id)
                 continue
+            case .unresponsive:
+                // Messaging timeout: busy, not gone (§6.3). The window
+                // stays registered with cached geometry.
+                result.unresponsive.insert(id)
+                sawTimeout = true
+                continue
+            case .alive:
+                break
             }
             if let frame = el.frame {
                 result.frames[id] = frame
             }
-            if el.bool(kAXMinimizedAttribute) == true {
-                result.minimized.insert(id)
+            if let value = el.bool(kAXMinimizedAttribute) {
+                result.minimized[id] = value
             }
-            if (el.attribute("AXFullScreen") as? Bool) == true {
-                result.fullscreen.insert(id)
+            if let value = el.attribute("AXFullScreen") as? Bool {
+                result.fullscreen[id] = value
             }
         }
         for id in result.dead {
             windows.removeValue(forKey: id)
         }
+        if sawTimeout {
+            noteTimeout()
+            return result
+        }
 
         // Windows that exist but were never adopted (missed creation events).
-        let known = Set(windows.values)
-        for el in app.elements(kAXWindowsAttribute) where !known.contains(el) {
-            result.unknown.append(el)
+        let (err, value) = app.attributeResult(kAXWindowsAttribute)
+        if err == .cannotComplete {
+            noteTimeout()
+            return result
         }
+        let known = Set(windows.values)
+        if let items = value as? [AnyObject] {
+            for item in items {
+                guard CFGetTypeID(item) == AXUIElementGetTypeID() else { continue }
+                let el = AXElement(item as! AXUIElement)
+                guard !known.contains(el) else { continue }
+                el.setMessagingTimeout(AXElement.messagingDeadline)   // §6.3
+                result.unknown.append(el)
+            }
+        }
+        noteSuccess()
         return result
     }
 }
