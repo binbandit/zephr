@@ -79,6 +79,15 @@ extension CGRect {
         width >= height ? .horizontal : .vertical
     }
 
+    /// Every component is a real number. `CGRect.null` (+infinity origin) and
+    /// `.infinite` are not, and neither is anything derived from them — the
+    /// solver refuses to lay out into such a rect, because `roundedToPixels`
+    /// would produce NaN frames and a NaN frame written to AX puts a window
+    /// where no rescue can reach it (§4.4, invariant 1).
+    public var isFinite: Bool {
+        origin.x.isFinite && origin.y.isFinite && width.isFinite && height.isFinite
+    }
+
     public func insetBy(gap: CGFloat) -> CGRect {
         guard gap > 0, width > gap * 2, height > gap * 2 else { return self }
         return insetBy(dx: gap, dy: gap)

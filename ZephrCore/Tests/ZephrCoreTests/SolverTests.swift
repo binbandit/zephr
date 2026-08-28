@@ -137,6 +137,94 @@ struct SolverAccordionTests {
     }
 }
 
+@Suite("Solver — degenerate inputs")
+struct SolverDegenerateTests {
+
+    /// Every emitted frame must be finite, non-negatively sized, and inside
+    /// the workspace rect: a frame at an origin outside the rect is a stashed
+    /// window nobody stashed (window-loss, invariant 1).
+    private func expectSane(_ result: PlacementSet, within rect: CGRect, context: String) {
+        for (id, p) in result.placements {
+            let f = p.frame
+            let finite = f.origin.x.isFinite && f.origin.y.isFinite && f.width.isFinite && f.height.isFinite
+            #expect(finite, "\(context): non-finite frame \(f) for \(id)")
+            #expect(f.width >= 0 && f.height >= 0, "\(context): negative size \(f) for \(id)")
+            guard finite else { continue }
+            #expect(f.minX >= rect.minX - 0.5 && f.maxX <= rect.maxX + 0.5,
+                    "\(context): \(id) x-range \(f.minX)–\(f.maxX) outside \(rect.minX)–\(rect.maxX)")
+            #expect(f.minY >= rect.minY - 0.5 && f.maxY <= rect.maxY + 0.5,
+                    "\(context): \(id) y-range \(f.minY)–\(f.maxY) outside \(rect.minY)–\(rect.maxY)")
+        }
+    }
+
+    @Test func emptyWorkspaceSolvesToNothing() {
+        let s = Workspace(id: 1)
+        let result = Solver.solve(workspace: s, in: screen)
+        #expect(result.placements.isEmpty)
+        #expect(result.raiseOrder.isEmpty)
+        #expect(result.focused == nil)
+    }
+
+    @Test func zeroSizeRectYieldsFiniteFramesInsideIt() {
+        let s = Workspace(id: 1)
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        let rect = CGRect(x: 100, y: 50, width: 0, height: 0)
+        let result = Solver.solve(workspace: s, in: rect)
+        #expect(result.placements.count == 3)
+        expectSane(result, within: rect, context: "zero-size rect")
+    }
+
+    @Test func nullRectYieldsFiniteFrames() {
+        // CGRect.null (origin at +inf) can reach the solver during display
+        // teardown races. Frames must stay finite: an infinite frame written
+        // to AX strands the window somewhere no rescue can see.
+        //
+        // The solver refuses a non-finite rect outright rather than inventing
+        // geometry for it: `TilingEngine.applyDisplay` writes a frame only for
+        // windows that appear in `placements`, so emitting none leaves every
+        // window exactly where it is — the safe degradation. Producing three
+        // finite-but-meaningless frames (all at the origin, say) would instead
+        // pile the workspace into a corner.
+        let s = Workspace(id: 1)
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        for rect in [CGRect.null, .infinite] {
+            let result = Solver.solve(workspace: s, in: rect)
+            #expect(result.placements.isEmpty, "\(rect) should solve to nothing")
+            for (id, p) in result.placements {
+                #expect(p.frame.isFinite, "non-finite frame \(p.frame) for \(id)")
+            }
+        }
+    }
+
+    @Test func gapsLargerThanTheDisplayStayInside() {
+        let s = Workspace(id: 1)
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        let rect = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let config = LayoutConfig(innerGap: 60, outerGap: 60)
+        let result = Solver.solve(workspace: s, in: rect, config: config)
+        #expect(result.placements.count == 3)
+        expectSane(result, within: rect, context: "oversized gaps")
+    }
+
+    @Test func threeWindowsInATwoPointRectStayInside() {
+        // The accordion case that used to emit a zero-width frame at an
+        // origin outside the rect: padding exceeded the rect and the focused
+        // length went negative, standardizing into an out-of-rect frame.
+        let s = Workspace(id: 1)
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        s.cycleLayout(w1) // accordion
+        s.focus(w2)
+        let rect = CGRect(x: 10, y: 10, width: 2, height: 300)
+        let result = Solver.solve(workspace: s, in: rect)
+        #expect(result.placements.count == 3)
+        expectSane(result, within: rect, context: "2pt accordion")
+    }
+}
+
 @Suite("Coordinate conversion")
 struct CoordinateTests {
     @Test func cocoaRoundTrip() {

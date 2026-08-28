@@ -141,7 +141,28 @@ final class HotkeyService {
         "i": 34, "j": 38, "k": 40, "l": 37, "m": 46, "n": 45, "o": 31,
         "p": 35, "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9,
         "w": 13, "x": 7, "y": 16, "z": 6,
+        // ANSI digit row (kVK_ANSI_0–9) — documented as valid leader keys.
+        "0": 29, "1": 18, "2": 19, "3": 20, "4": 21,
+        "5": 23, "6": 22, "7": 26, "8": 28, "9": 25,
     ]
+
+    /// Every key name `setLeader` accepts. `LeaderBinding.knownKeyNames` in
+    /// ZephrCore is the canonical list — it is what rejects a typo'd `leader =`
+    /// at parse time (§4.6: errors are never silent) — and this table must be
+    /// able to map every name Core accepts. Core is a pure package and cannot
+    /// reach this MainActor-isolated table, so `assertTablesAgree()` guards the
+    /// two against drift instead.
+    static var validKeyNames: [String] { keyCodesByName.keys.sorted() }
+
+    /// Fails fast in debug builds if the key tables diverge: a name Core
+    /// accepts but this table can't map would parse cleanly and then silently
+    /// leave the old leader bound — the exact failure §4.6 forbids.
+    private static func assertTablesAgree() {
+        assert(
+            Set(keyCodesByName.keys) == LeaderBinding.knownKeyNames,
+            "leader key tables drifted — Core accepts \(LeaderBinding.knownKeyNames.symmetricDifference(Set(keyCodesByName.keys))) that HotkeyService cannot map"
+        )
+    }
 
     /// Applies a leader binding from config. Returns false (keeping the
     /// current leader) when the key name is unknown.
@@ -168,9 +189,39 @@ final class HotkeyService {
     }
 
     private var tapRetry: Task<Void, Never>?
+    private var tapSource: CFRunLoopSource?
 
     func start() {
+        Self.assertTablesAgree()
         guard tap == nil else { return }
+        if createTap() {
+            tapRetry?.cancel()
+            tapRetry = nil
+            return
+        }
+        // A tap requested in the instant the Accessibility grant lands
+        // can fail before TCC propagates — retry instead of going deaf.
+        // A single task owns the 30-attempt budget; re-entering start()
+        // must never reset the counter (or the retry loops forever).
+        Self.log.error("event tap creation failed — retrying")
+        guard tapRetry == nil else { return }
+        tapRetry = Task { [weak self] in
+            for _ in 0..<30 {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                if self.tap != nil { break }
+                if self.createTap() {
+                    Self.log.info("event tap recovered")
+                    break
+                }
+            }
+            self?.tapRetry = nil
+        }
+    }
+
+    /// One tap-creation attempt. On success installs the run-loop source
+    /// (kept for removal in `stop()`) and starts the Secure Input poll.
+    private func createTap() -> Bool {
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.keyUp.rawValue)
@@ -182,33 +233,16 @@ final class HotkeyService {
             eventsOfInterest: mask,
             callback: hotkeyTapCallback,
             userInfo: nil
-        ) else {
-            // A tap requested in the instant the Accessibility grant lands
-            // can fail before TCC propagates — retry instead of going deaf.
-            Self.log.error("event tap creation failed — retrying")
-            tapRetry?.cancel()
-            tapRetry = Task { [weak self] in
-                for _ in 0..<30 {
-                    try? await Task.sleep(for: .seconds(1))
-                    guard let self, !Task.isCancelled else { return }
-                    if self.tap != nil { return }
-                    self.start()
-                    if self.tap != nil {
-                        Self.log.info("event tap recovered")
-                        return
-                    }
-                }
-            }
-            return
-        }
-        tapRetry?.cancel()
+        ) else { return false }
         self.tap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        tapSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
         // Secure Input detection (§6.4): never fail silently — and fall back
         // to Carbon hotkeys, which keep working while taps are muted.
+        secureInputPoll?.cancel()
         secureInputPoll = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5), tolerance: .seconds(2))
@@ -219,6 +253,10 @@ final class HotkeyService {
                     self.onSecureInputChange?(active)
                     if active {
                         self.closeLayer()
+                        // The tap sees nothing under Secure Input, so a
+                        // pending key-up never arrives to drain its pair —
+                        // a stale entry would eat a legitimate key-up later.
+                        self.swallowedKeyUps.removeAll()
                         self.registerCarbonFallback()
                     } else {
                         self.unregisterCarbonFallback()
@@ -226,14 +264,15 @@ final class HotkeyService {
                 }
             }
         }
+        return true
     }
 
     // MARK: - Carbon fallback (§6.4): chords survive Secure Input
 
     private var carbonHotkeys: [EventHotKeyRef] = []
     private var carbonHandler: EventHandlerRef?
-    /// Commands reachable while Secure Input is active, indexed by hotkey id.
-    private var carbonCommands: [Command] = []
+    /// Actions reachable while Secure Input is active, indexed by hotkey id.
+    private var carbonActions: [() -> Void] = []
 
     private func carbonModifiers(_ mods: Modifiers) -> UInt32 {
         var flags: UInt32 = 0
@@ -259,6 +298,17 @@ final class HotkeyService {
         bindings.append((Key.t, chordMods, .toggleFloat))
         bindings.append((Key.m, chordMods, .toggleMonocle))
         bindings.append((Key.grave, chordMods, .focusNextDisplay))
+        bindings.append((Key.q, chordMods, .closeWindow))
+        bindings.append((Key.minus, chordMods, .shrink))
+        bindings.append((Key.equals, chordMods, .grow))
+
+        // The docs promise the ⌃⌥ chords fall back wholesale (§6.4) — every
+        // direct chord in handleChord must have a Carbon twin, including
+        // the palette, which is a callback rather than a Command.
+        var actions: [(Int64, Modifiers, () -> Void)] = bindings.map { code, mods, command in
+            (code, mods, { [weak self] in self?.onCommand?(command) })
+        }
+        actions.append((Key.p, chordMods, { [weak self] in self?.onTogglePalette?() }))
 
         var handlerSpec = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -266,13 +316,13 @@ final class HotkeyService {
         )
         InstallEventHandler(GetApplicationEventTarget(), carbonHotkeyHandler, 1, &handlerSpec, nil, &carbonHandler)
 
-        carbonCommands = bindings.map(\.2)
-        for (index, binding) in bindings.enumerated() {
+        carbonActions = actions.map(\.2)
+        for (index, action) in actions.enumerated() {
             var ref: EventHotKeyRef?
             let hotKeyID = EventHotKeyID(signature: OSType(0x5A504852) /* "ZPHR" */, id: UInt32(index))
             RegisterEventHotKey(
-                UInt32(binding.0),
-                carbonModifiers(binding.1),
+                UInt32(action.0),
+                carbonModifiers(action.1),
                 hotKeyID,
                 GetApplicationEventTarget(),
                 0,
@@ -286,7 +336,7 @@ final class HotkeyService {
     private func unregisterCarbonFallback() {
         for ref in carbonHotkeys { UnregisterEventHotKey(ref) }
         carbonHotkeys.removeAll()
-        carbonCommands.removeAll()
+        carbonActions.removeAll()
         if let handler = carbonHandler {
             RemoveEventHandler(handler)
             carbonHandler = nil
@@ -294,14 +344,30 @@ final class HotkeyService {
     }
 
     fileprivate func carbonHotkeyFired(id: UInt32) {
-        guard carbonCommands.indices.contains(Int(id)) else { return }
-        onCommand?(carbonCommands[Int(id)])
+        guard carbonActions.indices.contains(Int(id)) else { return }
+        carbonActions[Int(id)]()
     }
 
     func stop() {
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
-        tap = nil
+        tapRetry?.cancel()
+        tapRetry = nil
+        if let tapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes)
+            self.tapSource = nil
+        }
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            self.tap = nil
+        }
         secureInputPoll?.cancel()
+        secureInputPoll = nil
+        unregisterCarbonFallback()
+        // Reset so a later start()'s poll re-detects Secure Input and
+        // re-registers the fallback instead of seeing "no change".
+        secureInputActive = false
+        swallowedKeyUps.removeAll()
+        closeLayer()
     }
 
     func reenableTap() {
@@ -316,23 +382,47 @@ final class HotkeyService {
 
     /// While paused, the keyboard belongs entirely to the user again.
     var suspended = false {
-        didSet { if suspended { closeLayer() } }
+        didSet {
+            if suspended { closeLayer() }
+            // A pause/resume can land while a chord key is still held —
+            // never let its pending key-up outlive the mode change, or the
+            // next ordinary press of that key loses its key-up and the
+            // user's app auto-repeats it forever.
+            swallowedKeyUps.removeAll()
+        }
     }
 
     /// Returns true when the event must be consumed.
     fileprivate func handle(type: CGEventType, event: CGEvent) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Events delivered while the tap was muted bypassed us, so any
+            // pending key-up pairs are stale — drop them before re-arming.
+            // The layer goes with them: a disable means we lost keys, and
+            // silently resuming consumption into a layer the user has since
+            // typed past is worse than making them press the leader again.
+            swallowedKeyUps.removeAll()
+            closeLayer()
             reenableTap()
             return false
         }
-        guard !suspended else { return false }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
-        if type == .keyUp {
-            if swallowedKeyUps.remove(keyCode) != nil { return true }
-            return state != .inactive
+        // Key-ups are purely pairing-based: consumed iff the matching
+        // key-down was. Checked before the suspended gate so a pair held
+        // across a pause still drains instead of leaking a stuck key-up.
+        if type == .keyUp { return swallowedKeyUps.remove(keyCode) != nil }
+
+        guard !suspended, type == .keyDown else { return false }
+
+        // Auto-repeat of a key whose first key-down we consumed. Repeats
+        // arrive bare once the modifier hand lifts first, so re-dispatching
+        // would both leak them into the focused app and re-toggle the layer
+        // ~30x/s. Swallow them: the pairing entry is already pending, so the
+        // eventual key-up still drains correctly.
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+           swallowedKeyUps.contains(keyCode) {
+            return true
         }
-        guard type == .keyDown else { return false }
 
         let mods = Modifiers(event.flags)
         let consumed = handleKeyDown(keyCode: keyCode, mods: mods)
@@ -463,6 +553,9 @@ final class HotkeyService {
         if let dir = direction(for: keyCode) {
             onCommand?(.resize(dir, fine: mods.shift))
         }
+        // Resize keys never reassign `state`, so its didSet can't rearm the
+        // idle timeout (§4.2) — an active resize session must not time out.
+        rearmLayerTimeout()
     }
 }
 

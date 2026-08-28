@@ -7,22 +7,59 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin the runner image *and* the toolchain. Pinning only Xcode leaves the
+  # build one `macos-latest` rollover away from a hard failure, because
+  # setup-xcode can only select versions the image actually ships. Unknown
+  # build settings are silently ignored by xcodebuild, so an unpinned or
+  # older toolchain would "succeed" while building under different
+  # actor-isolation rules.
+  #
+  # NB: local development runs Xcode 27 / Swift 6.4, which no hosted runner
+  # offers. A green local build therefore never implies a green CI build —
+  # the code has to stay 26.x-clean deliberately.
+  XCODE_VERSION: "26.0.1"
+
 jobs:
+  lint:
+    name: Public APIs only
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - name: Check for private API usage
+        run: just lint
+
   core-tests:
     name: ZephrCore tests
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+      - name: Show toolchain version
+        run: xcodebuild -version
       - name: Run engine test suite
-        run: swift test --package-path ZephrCore
+        run: just ci-core
 
   app-build:
     name: App build
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+      - name: Show toolchain version
+        run: xcodebuild -version
       - name: Build Zephr.app (unsigned)
-        run: |
-          xcodebuild -project Zephr.xcodeproj -scheme Zephr \
-            -configuration Release build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+        run: just ci-app

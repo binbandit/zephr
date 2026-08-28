@@ -102,4 +102,50 @@ struct AeroSpaceImportTests {
         #expect(result.rules.isEmpty)
         #expect(result.report.contains("Nothing"))
     }
+
+    @Test func quotedAppIDWithTrailingCommentImportsACleanBundleID() {
+        // A double-quoted id with a trailing comment used to import with the
+        // quote/comment garbage attached — a rule written into the user's
+        // config that can never match, reported as a success (§4.7).
+        let result = AeroSpaceImport.parse("""
+        [[on-window-detected]]
+        if.app-id = "com.apple.systempreferences" # keep Settings floating
+        run = "layout floating"
+
+        [[on-window-detected]]
+        if.app-id = 'com.example.picker' # single-quoted with comment
+        run = 'layout floating'
+        """)
+        #expect(result.rules == [
+            WindowRule(bundleID: "com.apple.systempreferences", action: .float),
+            WindowRule(bundleID: "com.example.picker", action: .float),
+        ])
+        #expect(result.skipped.isEmpty)
+    }
+
+    @Test func emptyAppIDIsSkippedAndReported() {
+        let result = AeroSpaceImport.parse("""
+        [[on-window-detected]]
+        if.app-id = ""
+        run = "layout floating"
+        """)
+        #expect(result.rules.isEmpty)
+        #expect(result.skipped.contains { $0.contains("app-id") })
+        #expect(result.imported.isEmpty)
+    }
+
+    @Test func zeroGapsImportAsZeroNotDropped() {
+        // 0 is meaningful — flush tiling must import as flush tiling, not as
+        // "no gap setting found".
+        let result = AeroSpaceImport.parse("""
+        [gaps]
+        inner.horizontal = 0
+        outer.left = 0
+        """)
+        #expect(result.innerGaps == 0)
+        #expect(result.outerGaps == 0)
+        #expect(result.gaps == 0)
+        #expect(result.imported.contains { $0.contains("inner gaps = 0") })
+        #expect(result.imported.contains { $0.contains("outer gaps = 0") })
+    }
 }

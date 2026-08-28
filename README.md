@@ -17,7 +17,7 @@ All of i3. None of the hostility.</p>
 ---
 
 - **Real tiling** — an i3-style tree: automatic layouts, workspaces 1–9 per display, focus by direction.
-- **Discoverable** — press the leader (⌥ Space) and a command strip shows what every key does; direct ⌃⌥ chords for speed. Never binds bare ⌥, so international typing survives.
+- **Discoverable** — press the leader (⌥ Space) and a command strip shows what every key does; direct ⌃⌥ chords for speed. The defaults never bind bare ⌥, so international typing survives.
 - **Never fights you** — dialogs and pickers float automatically; stubborn apps are learned; drag a window and drop zones re-tile it.
 - **Layouts that survive real life** — display profiles restore every window's exact position on redock, relaunch, and reboot.
 - **Trustworthy** — public APIs only, no SIP changes ever, Hardened Runtime, one explained permission. Quitting restores every window to exactly where it was.
@@ -45,5 +45,5 @@ just release            # archive → Developer ID export → DMG → notarize
 
 The engine (`ZephrCore/`) is a pure Swift package — tree, solver, workspaces,
 profiles — fully unit-tested including property tests. The app (`Zephr/`) is the
-AX/AppKit shell around it. Architecture notes live in [CLAUDE.md](CLAUDE.md) and
+AX/AppKit shell around it. Architecture notes live in [CONTRIBUTING.md](CONTRIBUTING.md) and
 the full product spec in [docs/DESIGN.md](docs/DESIGN.md).

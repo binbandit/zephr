@@ -7,7 +7,13 @@ import CoreGraphics
 public enum AeroSpaceImport {
 
     public struct Result: Sendable, Equatable {
-        public var gaps: CGFloat?
+        /// Gap sizes mapped from `[gaps]` `inner.*` / `outer.*` keys — the
+        /// first numeric value per side wins (Zephr has one gap per side
+        /// class). 0 is meaningful: flush tiling imports as flush tiling.
+        public var innerGaps: CGFloat?
+        public var outerGaps: CGFloat?
+        /// Source-compat alias for callers that predate the inner/outer split.
+        public var gaps: CGFloat? { innerGaps ?? outerGaps }
         public var rules: [WindowRule] = []
         public var imported: [String] = []
         public var skipped: [String] = []
@@ -45,8 +51,15 @@ public enum AeroSpaceImport {
         func flushWindowRule() {
             guard let rule = currentWindowRule else { return }
             currentWindowRule = nil
-            guard let app = rule.appID else {
-                result.skipped.append("an on-window-detected rule without if.app-id (Zephr matches by bundle id)")
+            guard let app = rule.appID, !app.isEmpty else {
+                result.skipped.append("an on-window-detected rule without an if.app-id (Zephr matches by bundle id)")
+                return
+            }
+            // A quote or whitespace surviving into the id means the source
+            // line didn't parse cleanly — importing it would write a rule
+            // that can never match (§4.7: the report stays honest).
+            guard !app.contains("\""), !app.contains("'"), !app.contains(where: \.isWhitespace) else {
+                result.skipped.append("if.app-id \(app) does not look like a bundle id — fix the AeroSpace config and re-import")
                 return
             }
             let runs = rule.runs.joined(separator: "; ")
@@ -67,10 +80,7 @@ public enum AeroSpaceImport {
         }
 
         for rawLine in text.components(separatedBy: .newlines) {
-            var line = rawLine.trimmingCharacters(in: .whitespaces)
-            if let hash = line.firstIndex(of: "#"), !line.contains("\"") || hash == line.startIndex {
-                line = String(line[..<hash]).trimmingCharacters(in: .whitespaces)
-            }
+            let line = stripComment(rawLine).trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
 
             if line.hasPrefix("[[") {
@@ -99,9 +109,34 @@ public enum AeroSpaceImport {
             }
 
             if section == "gaps" || section.hasPrefix("gaps.") {
-                if let number = Double(value), result.gaps == nil, number > 0 {
-                    result.gaps = CGFloat(number)
-                    result.imported.append("gaps = \(Int(number))")
+                // Keys arrive as `inner.horizontal = 8` under [gaps] or as
+                // `horizontal = 8` under [gaps.inner]; normalize to one form.
+                let fullKey = section == "gaps" ? key : "\(section.dropFirst("gaps.".count)).\(key)"
+                guard let number = Double(value), number.isFinite else {
+                    result.skipped.append("gaps \(fullKey) = \(value): only plain numbers map (per-monitor gap lists have no Zephr equivalent)")
+                    continue
+                }
+                guard (0...100).contains(number) else {
+                    result.skipped.append("gaps \(fullKey) = \(value): outside Zephr's 0–100 gap range")
+                    continue
+                }
+                switch fullKey.split(separator: ".").first {
+                case "inner":
+                    if result.innerGaps == nil {
+                        result.innerGaps = CGFloat(number)
+                        result.imported.append("inner gaps = \(Int(number))")
+                    } else if result.innerGaps != CGFloat(number) {
+                        result.skipped.append("gaps \(fullKey) = \(value): Zephr has a single inner gap (keeping \(Int(result.innerGaps!)))")
+                    }
+                case "outer":
+                    if result.outerGaps == nil {
+                        result.outerGaps = CGFloat(number)
+                        result.imported.append("outer gaps = \(Int(number))")
+                    } else if result.outerGaps != CGFloat(number) {
+                        result.skipped.append("gaps \(fullKey) = \(value): Zephr has a single outer gap (keeping \(Int(result.outerGaps!)))")
+                    }
+                default:
+                    result.skipped.append("gaps \(fullKey) = \(value): no Zephr equivalent")
                 }
                 continue
             }
@@ -128,6 +163,33 @@ public enum AeroSpaceImport {
             result.skipped.append("\(bindingCount) keybindings — Zephr ships its own scheme; set `preset = \"aerospace\"` in [keys] for ⌥-style chords")
         }
         return result
+    }
+
+    /// Removes a `#` comment, tracking TOML quote state — `"` (with `\`
+    /// escapes) and literal `'` — so a `#` inside a value survives and a
+    /// trailing comment after a quoted value is actually stripped.
+    private static func stripComment(_ line: String) -> String {
+        var inDouble = false
+        var inSingle = false
+        var skipNext = false
+        for index in line.indices {
+            guard !skipNext else { skipNext = false; continue }
+            let char = line[index]
+            if inDouble {
+                if char == "\\" { skipNext = true }
+                else if char == "\"" { inDouble = false }
+            } else if inSingle {
+                if char == "'" { inSingle = false }
+            } else {
+                switch char {
+                case "\"": inDouble = true
+                case "'": inSingle = true
+                case "#": return String(line[..<index])
+                default: break
+                }
+            }
+        }
+        return line
     }
 
     private static func unquote(_ raw: String) -> String {

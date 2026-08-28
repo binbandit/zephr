@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import ZephrCore
 
 /// Snapshot of one connected display in global CG (top-left origin)
@@ -18,26 +19,58 @@ final class DisplayService {
     private var debounce: Task<Void, Never>?
     private var observation: Task<Void, Never>?
 
+    /// §6.1 names the CG reconfiguration callback as the display source:
+    /// wake/undock storms can reach it before (or without) AppKit's screen-
+    /// parameters notification. Both feed the same debouncer. Stored so
+    /// deinit can unregister the identical function pointer. No captures —
+    /// context goes through `DisplayServiceBox` (C convention).
+    private nonisolated let reconfigurationCallback: CGDisplayReconfigurationCallBack = { _, flags, _ in
+        // Each change arrives as a begin/end pair; only react to the end.
+        guard !flags.contains(.beginConfigurationFlag) else { return }
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                DisplayServiceBox.shared?.displayConfigurationChanged()
+            }
+        }
+    }
+
     init() {
         observation = Task { [weak self] in
             let changes = NotificationCenter.default.notifications(
                 named: NSApplication.didChangeScreenParametersNotification
             )
             for await _ in changes {
-                self?.screenParametersChanged()
+                self?.displayConfigurationChanged()
             }
         }
+        DisplayServiceBox.shared = self
+        CGDisplayRegisterReconfigurationCallback(reconfigurationCallback, nil)
     }
 
     deinit {
         observation?.cancel()
+        CGDisplayRemoveReconfigurationCallback(reconfigurationCallback, nil)
     }
 
-    private func screenParametersChanged() {
+    fileprivate func displayConfigurationChanged() {
         debounce?.cancel()
         debounce = Task {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
+            // §6.4: debounce + stability check — on wake with an external
+            // display, a parameters change can post while visibleFrame is
+            // still transitional, and fingerprinting that transient
+            // arrangement records a bogus profile. Only fire once two
+            // consecutive samples agree; bounded, so a flapping display
+            // cannot postpone reconciliation forever (never stall).
+            var sample = self.current()
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                let next = self.current()
+                if next == sample { break }
+                sample = next
+            }
             self.onChange?()
         }
     }
@@ -67,4 +100,10 @@ final class DisplayService {
         }
         return infos
     }
+}
+
+/// Static hop for the C reconfiguration callback (main queue → MainActor).
+@MainActor
+private enum DisplayServiceBox {
+    static weak var shared: DisplayService?
 }

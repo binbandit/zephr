@@ -57,15 +57,83 @@ final class GapResizeController {
     private var strips: [NSWindow] = []
     private(set) var dragActive = false
 
+    /// Narrowest strip we will place. With flush tiling (`gaps = 0`) there is
+    /// no gap to sit in, so a strip must overlap content slightly or mouse
+    /// split-resize (§4.3) would not exist at all for that config — but it
+    /// stays at 4 pt rather than the engine's 8 pt clamp, halving how much
+    /// content it can swallow.
+    private static let minimumStripWidth: CGFloat = 4
+
     func update(boundaries: [Boundary]) {
         guard !dragActive else { return } // never rebuild under a live drag
-        for strip in strips { strip.orderOut(nil) }
-        strips.removeAll()
         guard let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.screens.first
         else { return }
 
-        for boundary in boundaries {
-            let view = GapStripView(boundary: boundary)
+        // §4.3 pause means paused: a layout settle while paused must not
+        // resurrect the click-eating strips (presentations, screen sharing).
+        let paused = AppDelegate.shared?.appState.paused ?? false
+
+        // The engine clamps strips to an 8 pt minimum and re-centres them,
+        // so with small gaps they would overlap window content and eat its
+        // clicks (scrollbars, sidebar dividers). Never widen past the true
+        // gap; skip seams too thin to grab at all.
+        let gap = CGFloat(AppDelegate.shared?.configService.current.layout.innerGap ?? 8)
+
+        // Floating windows sit above the strips' seams — a strip covering
+        // one would swallow its clicks. Use `lastAppliedFrame` (where the
+        // window actually is) rather than `lastVisibleFrame` (where it was
+        // last seen on screen): a float parked on an inactive workspace is
+        // stashed off-screen, and matching on its remembered on-screen frame
+        // would kill strips in that region of the *active* workspace.
+        let floatingFrames: [CGRect] = AppDelegate.shared?.engine.windows.values
+            .filter { $0.floating && !$0.minimized && !$0.fullscreen }
+            .compactMap { $0.lastAppliedFrame ?? $0.lastVisibleFrame } ?? []
+
+        var wanted: [Boundary] = []
+        if !paused {
+            let width = max(gap, Self.minimumStripWidth)
+            for boundary in boundaries {
+                var rect = boundary.rect
+                if boundary.direction.orientation == .horizontal {
+                    let mid = rect.midX
+                    rect.size.width = min(rect.width, width)
+                    rect.origin.x = mid - rect.width / 2
+                } else {
+                    let mid = rect.midY
+                    rect.size.height = min(rect.height, width)
+                    rect.origin.y = mid - rect.height / 2
+                }
+                guard !floatingFrames.contains(where: { $0.intersects(rect) }) else { continue }
+                wanted.append(Boundary(window: boundary.window, direction: boundary.direction, rect: rect))
+            }
+        }
+
+        // Reuse strip windows across settles: rebuilding every settle churns
+        // one NSWindow per boundary and risks deallocating a window whose
+        // view is mid-event-dispatch.
+        while strips.count > wanted.count {
+            strips.removeLast().orderOut(nil)
+        }
+        for (index, boundary) in wanted.enumerated() {
+            let window: NSWindow
+            let view: GapStripView
+            if index < strips.count, let existing = strips[index].contentView as? GapStripView {
+                window = strips[index]
+                view = existing
+            } else {
+                view = GapStripView(boundary: boundary)
+                window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+                window.isOpaque = false
+                window.backgroundColor = .clear
+                window.hasShadow = false
+                window.ignoresMouseEvents = false
+                window.acceptsMouseMovedEvents = true
+                window.level = .floating
+                window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+                window.contentView = view
+                strips.append(window)
+            }
+            view.boundary = boundary
             view.onDrag = { [weak self] delta in
                 self?.dragActive = true
                 self?.onDrag?(boundary.window, boundary.direction, delta)
@@ -74,18 +142,9 @@ final class GapResizeController {
                 self?.dragActive = false
                 self?.onDragEnded?()
             }
-            let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = false
-            window.ignoresMouseEvents = false
-            window.acceptsMouseMovedEvents = true
-            window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-            window.contentView = view
             window.setFrame(globalToCocoa(boundary.rect, primaryDisplayHeight: primary.frame.height), display: false)
+            window.invalidateCursorRects(for: view)
             window.orderFrontRegardless()
-            strips.append(window)
         }
     }
 
@@ -95,7 +154,7 @@ final class GapResizeController {
 }
 
 private final class GapStripView: NSView {
-    let boundary: GapResizeController.Boundary
+    var boundary: GapResizeController.Boundary
     var onDrag: ((CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
 

@@ -28,6 +28,20 @@ public enum Solver {
 
     public static func solve(workspace: Workspace, in workspaceRect: CGRect, config: LayoutConfig = .default) -> PlacementSet {
         var result = PlacementSet()
+
+        // A degenerate workspace rect must never reach the frame writers.
+        // `CGRect.null` has a +infinity origin, which `insetBy` preserves and
+        // `roundedToPixels` turns into NaN (inf − inf) — and a NaN frame handed
+        // to AX puts the window somewhere no rescue can find it (invariant 1).
+        // Display disconnect/wake races are the realistic source of one, so
+        // solve nothing rather than something unrecoverable.
+        // `.infinite` needs its own check: its components are technically
+        // finite (±greatestFiniteMagnitude), so it passes `isFinite` and
+        // solves to 1e307-sized frames.
+        guard workspaceRect.isFinite, !workspaceRect.isNull, !workspaceRect.isInfinite else {
+            return result
+        }
+
         let rect = workspaceRect.insetBy(gap: config.outerGap)
 
         if !workspace.root.children.isEmpty {
@@ -140,6 +154,10 @@ public enum Solver {
         if padding * CGFloat(n - 1) > total * 0.5 {
             padding = max(2, (total * 0.5) / CGFloat(max(1, n - 1)))
         }
+        // Degenerate rects (the 2-point floor above can still exceed them):
+        // bound padding so the focused length below can't go negative — a
+        // negative-length CGRect standardizes into a frame outside `rect`.
+        padding = max(0, min(padding, total / CGFloat(n)))
 
         let origin = axis == .horizontal ? rect.minX : rect.minY
         for (i, child) in node.children.enumerated() {
@@ -150,7 +168,7 @@ public enum Solver {
                 length = padding
             } else if i == focusedIdx {
                 start = origin + CGFloat(i) * padding
-                length = total - padding * CGFloat(n - 1)
+                length = max(0, total - padding * CGFloat(n - 1))
             } else {
                 start = origin + total - padding * CGFloat(n - i)
                 length = padding

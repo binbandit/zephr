@@ -60,6 +60,7 @@ final class PaletteController {
     }
 
     private let panel: NSPanel
+    private let windowDelegate = CallbackWindowDelegate()
     private let model = Model()
     private weak var engine: TilingEngine?
 
@@ -80,6 +81,11 @@ final class PaletteController {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: PaletteView(model: model))
+
+        // §4.2 cites Spotlight/Raycast behaviour: losing key (⌘Tab, a click
+        // elsewhere) dismisses — the panel must never linger over every app.
+        windowDelegate.onResignKey = { [weak self] in self?.hide() }
+        panel.delegate = windowDelegate
 
         model.commit = { [weak self] entry in self?.commit(entry) }
         model.dismiss = { [weak self] in self?.hide() }
@@ -133,14 +139,29 @@ final class PaletteController {
         for n in 1...9 {
             entries.append(.workspace(n))
         }
+        // §4.2: chord hints follow the active key preset; vim (no chords)
+        // falls back to the leader-layer keys.
+        let prefix = ChordHints.prefix
+        func chord(_ keys: String, orLeader leader: String) -> String {
+            prefix.map { $0 + keys } ?? leader
+        }
         let commands: [(Command, String)] = [
-            (.toggleFloat, "⌃⌥T"), (.toggleMonocle, "⌃⌥M"), (.balance, "leader ="),
+            (.toggleFloat, chord("T", orLeader: "leader t")),
+            (.toggleMonocle, chord("M", orLeader: "leader m")),
+            (.balance, "leader ="),
             (.cycleLayout, "leader ␣"), (.rescueWindows, "leader w"),
-            (.focusNextDisplay, "⌃⌥`"), (.closeWindow, "⌃⌥Q"),
+            (.focusNextDisplay, chord("`", orLeader: "leader ⇥")),
+            (.closeWindow, chord("Q", orLeader: "leader q")),
             (.toggleWorkspaceFloatMode, ""), (.togglePause, ""),
             (.splitPreselect(.horizontal), "leader s"), (.splitPreselect(.vertical), "leader v"),
-            (.focus(.left), "⌃⌥H"), (.focus(.down), "⌃⌥J"), (.focus(.up), "⌃⌥K"), (.focus(.right), "⌃⌥L"),
-            (.move(.left), "⌃⌥⇧H"), (.move(.down), "⌃⌥⇧J"), (.move(.up), "⌃⌥⇧K"), (.move(.right), "⌃⌥⇧L"),
+            (.focus(.left), chord("H", orLeader: "leader h")),
+            (.focus(.down), chord("J", orLeader: "leader j")),
+            (.focus(.up), chord("K", orLeader: "leader k")),
+            (.focus(.right), chord("L", orLeader: "leader l")),
+            (.move(.left), chord("⇧H", orLeader: "leader ⇧h")),
+            (.move(.down), chord("⇧J", orLeader: "leader ⇧j")),
+            (.move(.up), chord("⇧K", orLeader: "leader ⇧k")),
+            (.move(.right), chord("⇧L", orLeader: "leader ⇧l")),
         ]
         entries.append(contentsOf: commands.map { .command($0.0, keys: $0.1) })
         return entries
