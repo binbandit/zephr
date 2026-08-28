@@ -10,7 +10,6 @@ build/
 # Swift Package Manager
 .build/
 .swiftpm/
-Package.resolved
 
 # Release pipeline output (justfile)
 dist/

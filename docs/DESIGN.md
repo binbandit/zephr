@@ -360,5 +360,5 @@ title = "^zoom floating"
 action = "float"
 
 [callbacks]
-on-workspace-changed = [] # e.g. ["sketchybar --trigger ws_change WS=$WORKSPACE"]
+on-workspace-changed = [] # e.g. ["sketchybar --trigger ws_change WS=$ZEPHR_WORKSPACE"]
 ```

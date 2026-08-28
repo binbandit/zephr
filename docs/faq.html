@@ -56,10 +56,11 @@
 <p>It can't be. Controlling other apps' windows requires the Accessibility API and a keyboard event tap; both are disallowed for sandboxed App Store apps. This is true of every window manager. Zephr ships as a signed, Hardened-Runtime, notarizable app distributed directly.</p>
 
 <h2 id="spaces"><a class="anchor" href="#spaces">Why virtual workspaces instead of macOS Spaces?</a></h2>
-<p>Apple provides no public API to create, switch, or move windows between Spaces — tools that control Spaces do it by disabling SIP, which Zephr will never ask for. Zephr's workspaces are its own, engineered to be seamless: computed off-screen stashing that adapts to any monitor arrangement, app-hiding so Mission Control stays clean, and a hard never-lose-a-window guarantee. Windows on your other native Spaces are simply left alone.</p>
+<p>Apple provides no public API to create, switch, or move windows between Spaces — tools that control Spaces do it by disabling SIP, which Zephr will never ask for. Zephr's workspaces are its own, engineered to be seamless: computed off-screen stashing that adapts to any monitor arrangement, app-hiding so Mission Control stays clean, and a hard never-lose-a-window guarantee.</p>
+<p><strong>Known limitation:</strong> Zephr is not yet Space-aware. It manages every window an app reports, including windows sitting on another native Space, so mixing Spaces with Zephr workspaces currently leaves empty-looking tiles. Use Zephr's workspaces instead of Spaces until this lands.</p>
 
 <h2 id="battery"><a class="anchor" href="#battery">Will it drain my battery?</a></h2>
-<p>It's designed not to: event-driven first, with a reconciliation audit that only runs while things are actually happening (a deep sweep every ~30&nbsp;s at idle), coalesced timers, and per-app queues at sensible QoS. Idle CPU budget is &lt;0.5%. If you ever see it misbehave in Activity Monitor, that's a bug — report it.</p>
+<p>It's designed not to: event-driven first, with a reconciliation audit that only runs while things are actually happening (a deep sweep every ~30&nbsp;s at idle), coalesced timers, and per-app queues at sensible QoS. The design budget is &lt;0.5% idle CPU (not yet measured in a release lane). If you ever see it misbehave in Activity Monitor, that's a bug — report it.</p>
 
 <h2 id="multimon"><a class="anchor" href="#multimon">How does multi-monitor work?</a></h2>
 <p>Each display shows its own workspace (the menu bar reads e.g. <code>3·1</code>). Focus and window-moves cross display edges naturally; <kbd>⌃⌥`</kbd> hops displays. Docking and undocking is the signature feature: layouts are recorded per arrangement and restored exactly — see <a href="guide.html#displays">the guide</a>.</p>
