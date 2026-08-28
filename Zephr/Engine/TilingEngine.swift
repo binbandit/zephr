@@ -365,7 +365,7 @@ final class TilingEngine {
     }
 
     private func detachApp(pid: pid_t) {
-        guard connections.removeValue(forKey: pid) != nil else { return }
+        guard let conn = connections.removeValue(forKey: pid) else { return }
         hub.unwatchApp(pid: pid)
         hiddenApps.remove(pid)
         unresponsivePids.remove(pid)
@@ -373,12 +373,29 @@ final class TilingEngine {
         // checks connection identity); the in-flight marker is cleared
         // here so a re-attached pid can be audited again immediately.
         auditsInFlight.remove(pid)
-        let ids = windows.values.filter { $0.pid == pid }.map(\.id)
-        for id in ids {
-            windows.removeValue(forKey: id)
-            model.removeWindow(id)
+        let managed = windows.values.filter { $0.pid == pid }
+        // Normally the app is gone and there is nothing to rescue. But the
+        // audit also detaches a pid `NSRunningApplication` no longer
+        // resolves, and `disablePracticeWindows` detaches directly — if the
+        // app is in fact alive, its stashed windows would be dropped from
+        // the model while still parked off-screen, invisible to
+        // shutdownRestore, `leader w` and the audit alike (invariant 1).
+        // Hand them back to their last on-screen frames on the way out.
+        if let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
+            let stranded = managed.filter { !isVisible($0.id) && !$0.minimized }
+            if !stranded.isEmpty {
+                if app.isHidden { app.unhide() }
+                // The detached connection still holds these ids; reusing it
+                // keeps the rescue a single batch with no re-registration.
+                let batch = stranded.map { ($0.id, $0.lastVisibleFrame) }
+                Task { _ = await conn.applyFrames(batch) }
+            }
         }
-        if !ids.isEmpty { applyAll() }
+        for mw in managed {
+            windows.removeValue(forKey: mw.id)
+            model.removeWindow(mw.id)
+        }
+        if !managed.isEmpty { applyAll() }
     }
 
     private func appActivated(pid: pid_t) {
@@ -1065,9 +1082,15 @@ final class TilingEngine {
         reapplyForFocusDependentLayout(id)
         syncAppState()
         Task {
-            await conn.raise(id)
-            NSRunningApplication(processIdentifier: mw.pid)?
-                .activate()
+            if await conn.focus(id) { return }
+            // Not frontmost yet. Cooperative activation can decline while
+            // another app is mid-transition, so ask AppKit too and give the
+            // app one beat to come forward before a single retry — better
+            // than dropping the command the whole product is built on.
+            NSRunningApplication(processIdentifier: mw.pid)?.activate()
+            try? await Task.sleep(for: .milliseconds(60))
+            if await conn.focus(id) { return }
+            Self.log.warning("focus did not take for window \(id.raw) (pid \(mw.pid))")
         }
     }
 
