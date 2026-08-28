@@ -69,6 +69,8 @@ final class TilingEngine {
     private(set) var connections: [pid_t: AppAXConnection] = [:]
     /// Apps *we* hid for the stash — never touch apps the user hid (⌘H).
     private var hiddenApps: Set<pid_t> = []
+    /// Pids with an in-flight `maybeHideApp` probe.
+    private var hideProbesInFlight: Set<pid_t> = []
     private var displays: [DisplayInfo] = []
     /// Recent frame writes, to tell our own echo events from user drift.
     private var pendingWrites: [WindowID: (frame: CGRect, at: ContinuousClock.Instant)] = [:]
@@ -323,10 +325,15 @@ final class TilingEngine {
             NSRunningApplication(processIdentifier: pid)?.unhide()
         }
         hiddenApps.removeAll()
-        let ordered = windows.values.sorted { a, b in
-            (isVisible(a.id) ? 1 : 0) < (isVisible(b.id) ? 1 : 0)
+        // A partition, not a sort: this only needs invisible-before-visible,
+        // and as a comparator `isVisible` (two dictionary lookups and a tree
+        // walk) ran O(n log n) times on the shutdown path.
+        var invisible: [ManagedWindow] = []
+        var visible: [ManagedWindow] = []
+        for mw in windows.values {
+            if isVisible(mw.id) { visible.append(mw) } else { invisible.append(mw) }
         }
-        for mw in ordered where !mw.fullscreen {
+        for mw in (invisible + visible) where !mw.fullscreen {
             mw.element.setMessagingTimeout(0.1)
             mw.element.set(kAXPositionAttribute, point: mw.originalFrame.origin)
             mw.element.set(kAXSizeAttribute, size: mw.originalFrame.size)
@@ -388,7 +395,9 @@ final class TilingEngine {
                 // The detached connection still holds these ids; reusing it
                 // keeps the rescue a single batch with no re-registration.
                 let batch = stranded.map { ($0.id, $0.lastVisibleFrame) }
-                Task { _ = await conn.applyFrames(batch) }
+                nextWriteGeneration += 1
+                let generation = nextWriteGeneration
+                Task { _ = await conn.applyFrames(batch, generation: generation) }
             }
         }
         for mw in managed {
@@ -824,6 +833,9 @@ final class TilingEngine {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             self.applyDisplay(display)
+            // Drift correction changes real geometry, so the snapshot has to
+            // follow it; `applyDisplay` no longer persists on its own.
+            self.persistSoon()
         }
     }
 
@@ -997,6 +1009,8 @@ final class TilingEngine {
             for (pid, batch) in perApp {
                 guard let conn = connections[pid] else { continue }
                 for (id, frame) in batch { pendingWrites[id] = (frame, now) }
+                nextWriteGeneration += 1
+                let generation = nextWriteGeneration
                 // Record the results like every other write path. Dropping
                 // them leaves `lastAppliedFrame` holding the stash frame the
                 // window no longer occupies, so on resume the no-op filter
@@ -1004,7 +1018,12 @@ final class TilingEngine {
                 // every inactive workspace's windows stay piled on top of
                 // the active layout, and the audit can't correct it because
                 // its drift check only looks at visible windows.
-                Task { self.noteWriteResults(await conn.applyFrames(batch)) }
+                //
+                // Stamped so an apply still in flight when the user paused
+                // cannot land afterwards and re-stash what we just released.
+                Task {
+                    self.noteWriteResults(await conn.applyFrames(batch, generation: generation))
+                }
             }
             focusBorder?.update(frame: nil)
             gapResizer?.clear()
@@ -1148,14 +1167,72 @@ final class TilingEngine {
 
     // MARK: - Apply (model → screen)
 
+    /// The AppKit screen the next command will land on.
+    ///
+    /// HUDs must follow the engine's focused display rather than
+    /// `NSScreen.main`: Zephr is an agent app that never activates, so
+    /// AppKit's "main" screen is wherever the frontmost *other* app happens
+    /// to be keyed — on a multi-display setup that is regularly not the
+    /// screen the user is driving (§4.4).
+    var focusedScreen: NSScreen? {
+        model.focusedDisplay.flatMap(DisplayService.screen(for:))
+    }
+
+    /// Monotonic stamp ordering frame batches; see `applyFrames`.
+    private var nextWriteGeneration: UInt64 = 0
+
+    /// Rolling cross-app drift tally for the Mission Control heuristic.
+    private var driftWindowStart: ContinuousClock.Instant?
+    private var driftWindowSeen = 0
+    private var driftWindowEligible = 0
+
+    /// Set between an `applyAll()` request and the coalesced solve.
+    private var applyScheduled = false
+    /// Whether the gap-resize boundaries need recomputing (layout changed).
+    private var gapBoundariesStale = true
+
+    /// Whether a window floats.
+    ///
+    /// The workspace is authoritative while the window is in the tree;
+    /// `ManagedWindow.floating` is the remembered value for windows
+    /// currently outside it — minimized, native-fullscreen, or belonging to
+    /// a hidden app — and is what puts them back correctly.
+    private func isFloating(_ id: WindowID) -> Bool {
+        guard let mw = windows[id] else { return false }
+        return model.workspace(containing: id)?.isFloating(id) ?? mw.floating
+    }
+
     private func isVisible(_ id: WindowID) -> Bool {
         guard let ws = model.workspace(containing: id),
               let home = ws.homeDisplay else { return false }
         return model.activeWorkspaceByDisplay[home] == ws.id
     }
 
+    /// Re-layout every display, coalesced.
+    ///
+    /// Callers fire this from inside loops: adoption hits it once per window
+    /// at launch, and one audit tick can hit it once per window again. Each
+    /// call used to solve *every* display and walk every app's frames, so 30
+    /// windows coming up meant 30 full re-layouts of the whole desktop. The
+    /// work is deferred to the end of the current main-actor turn and runs
+    /// once no matter how many times it was requested (§6.3).
     func applyAll() {
+        guard !applyScheduled else { return }
+        applyScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.applyScheduled = false
+            self.applyNow()
+        }
+    }
+
+    private func applyNow() {
         for display in displays { applyDisplay(display.id) }
+        // Both are whole-desktop concerns, so they belong here rather than
+        // inside `applyDisplay` — running them per display repeated a
+        // full-tree profile capture and a state write for every monitor.
+        updateAppHiding()
+        persistSoon()
         syncAppState()
     }
 
@@ -1164,6 +1241,7 @@ final class TilingEngine {
         guard let info = displays.first(where: { $0.id == displayID }) else { return }
         let active = model.activeWorkspace(on: displayID)
         let solved = Solver.solve(workspace: active, in: info.visibleFrame, config: config)
+        gapBoundariesStale = true
 
         var perApp: [pid_t: [(WindowID, CGRect)]] = [:]
         var raises: [pid_t: [WindowID]] = [:]
@@ -1213,8 +1291,14 @@ final class TilingEngine {
             // covers slow apps whose echo lands over a second after issue.
             let now = ContinuousClock.now
             for (id, frame) in work { pendingWrites[id] = (frame, now) }
+            nextWriteGeneration += 1
+            let generation = nextWriteGeneration
             Task {
-                let result = await conn.applyFrames(work)
+                let result = await conn.applyFrames(work, generation: generation)
+                // A newer apply for this pid already landed; this batch was
+                // never written, so it must not be recorded as applied nor
+                // read as evidence the app is unresponsive.
+                guard !result.superseded else { return }
                 for id in raiseList { await conn.raise(id) }
                 self.noteWriteResults(result)
                 // Short batch = aborted batch (§6.3): `applyFrames` stops
@@ -1233,8 +1317,6 @@ final class TilingEngine {
             }
         }
 
-        updateAppHiding()
-        persistSoon()
     }
 
     private func noteWriteResults(_ result: AppAXConnection.WriteResult) {
@@ -1344,7 +1426,13 @@ final class TilingEngine {
     /// visible, and hiding the app would take it too.
     private func maybeHideApp(_ pid: pid_t) {
         guard let conn = connections[pid] else { return }
+        // One probe per pid at a time. `updateAppHiding` runs on every
+        // re-layout, and each probe is a full AX window listing plus an id
+        // lookup per window — without this, a burst of applies stacks
+        // several identical round trips on the app's queue (§6.3).
+        guard hideProbesInFlight.insert(pid).inserted else { return }
         Task {
+            defer { self.hideProbesInFlight.remove(pid) }
             let elements = await conn.listWindows()
             // No evidence (degraded app, empty listing) — don't hide blind.
             guard !elements.isEmpty else { return }
@@ -1678,12 +1766,15 @@ final class TilingEngine {
         // once, suspect a Mission Control transition and stand down (§6.4).
         var drifted: Set<DisplayID> = []
         var driftCount = 0
+        var eligible = 0
         for (id, actual) in result.frames {
-            guard let mw = windows[id], !mw.floating, !mw.minimized,
+            guard let mw = windows[id], !isFloating(id), !mw.minimized,
                   !result.unresponsive.contains(id),
                   isVisible(id),
-                  let expected = mw.lastAppliedFrame,
-                  !actual.approximatelyEquals(expected, tolerance: 3),
+                  let expected = mw.lastAppliedFrame
+            else { continue }
+            eligible += 1
+            guard !actual.approximatelyEquals(expected, tolerance: 3),
                   // A snapping app parked where our last write settled is
                   // converged, not drifting (§6.3).
                   !(mw.lastSettledFrame?.approximatelyEquals(actual, tolerance: 3) ?? false)
@@ -1693,7 +1784,22 @@ final class TilingEngine {
                 drifted.insert(home)
             }
         }
-        if driftCount > 0 && driftCount <= max(3, result.frames.count / 2) {
+        guard driftCount > 0 else { return }
+
+        // "Most windows moved" has to be judged across every app, not this
+        // one. The audit runs per pid, so a single-window app always saw
+        // 1 <= max(3, 0) and the suppression could never fire — Mission
+        // Control would fight us window by window. Accumulate over a short
+        // window so one transition is seen whole.
+        let now = ContinuousClock.now
+        if driftWindowStart.map({ now - $0 > .milliseconds(750) }) ?? true {
+            driftWindowStart = now
+            driftWindowSeen = 0
+            driftWindowEligible = 0
+        }
+        driftWindowSeen += driftCount
+        driftWindowEligible += eligible
+        if driftWindowSeen <= max(3, driftWindowEligible / 2) {
             for display in drifted { scheduleReapply(display) }
         }
     }
@@ -1713,7 +1819,7 @@ final class TilingEngine {
                 title: mw.title,
                 frame: mw.lastVisibleFrame,
                 workspace: ws?.id ?? mw.suspendedWorkspace ?? 1,
-                floating: ws?.isFloating(mw.id) ?? mw.floating
+                floating: isFloating(mw.id)
             )
         }
     }
@@ -1755,8 +1861,14 @@ final class TilingEngine {
             focusBorder?.update(frame: nil)
         }
 
-        // Gap-resize strips follow the settled layout.
-        gapResizer?.update(boundaries: gapBoundaries())
+        // Gap-resize strips follow the settled layout. Boundaries are an
+        // O(n²) pass over every tiled frame and they only move when the
+        // layout does, so a focus change — which calls through here on the
+        // §6.3 50 ms budget — must not pay for one.
+        if gapBoundariesStale, let gapResizer {
+            gapBoundariesStale = false
+            gapResizer.update(boundaries: gapBoundaries())
+        }
 
         // Workspace-changed callbacks (§4.8): SketchyBar and friends.
         if workspace != lastAnnouncedWorkspace {

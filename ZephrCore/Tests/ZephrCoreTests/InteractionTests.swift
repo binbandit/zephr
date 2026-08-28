@@ -86,7 +86,7 @@ struct AeroSpaceImportTests {
         run = ['move-node-to-workspace 3']
         """)
 
-        #expect(result.gaps == 10)
+        #expect(result.innerGaps == 10)
         #expect(result.rules.count == 2)
         #expect(result.rules[0] == WindowRule(bundleID: "com.apple.systempreferences", action: .float))
         #expect(result.rules[1].bundleID == "us.zoom.xos")
@@ -144,7 +144,6 @@ struct AeroSpaceImportTests {
         """)
         #expect(result.innerGaps == 0)
         #expect(result.outerGaps == 0)
-        #expect(result.gaps == 0)
         #expect(result.imported.contains { $0.contains("inner gaps = 0") })
         #expect(result.imported.contains { $0.contains("outer gaps = 0") })
     }

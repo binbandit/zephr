@@ -29,16 +29,15 @@ public enum Solver {
     public static func solve(workspace: Workspace, in workspaceRect: CGRect, config: LayoutConfig = .default) -> PlacementSet {
         var result = PlacementSet()
 
-        // A degenerate workspace rect must never reach the frame writers.
-        // `CGRect.null` has a +infinity origin, which `insetBy` preserves and
-        // `roundedToPixels` turns into NaN (inf − inf) — and a NaN frame handed
-        // to AX puts the window somewhere no rescue can find it (invariant 1).
-        // Display disconnect/wake races are the realistic source of one, so
-        // solve nothing rather than something unrecoverable.
-        // `.infinite` needs its own check: its components are technically
-        // finite (±greatestFiniteMagnitude), so it passes `isFinite` and
-        // solves to 1e307-sized frames.
-        guard workspaceRect.isFinite, !workspaceRect.isNull, !workspaceRect.isInfinite else {
+        // A degenerate workspace rect must never reach the frame writers: a
+        // NaN or astronomically large frame handed to AX puts the window
+        // somewhere no rescue can find it (invariant 1), so solve nothing
+        // instead. `.null`'s infinite origin is caught by `isFinite` — the
+        // pixel rounding would turn it into NaN (inf − inf) — but
+        // `.infinite` needs its own clause, because its components are
+        // technically finite (±greatestFiniteMagnitude) and would solve to
+        // 1e307-sized frames.
+        guard workspaceRect.isFinite, !workspaceRect.isInfinite else {
             return result
         }
 

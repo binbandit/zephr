@@ -19,20 +19,35 @@ public struct LeaderBinding: Sendable, Equatable {
         self.key = key
     }
 
-    /// Every key name the config accepts for the leader chord. The app's
-    /// HotkeyService key table must map each of these — anything else gets
-    /// an inline warning and the default leader, so an unbindable leader is
-    /// never a silent no-op and never rejects the rest of the file (§4.6).
-    public static let knownKeyNames: Set<String> = {
-        var names: Set<String> = ["space", "tab", "grave", "`"]
-        for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
-            names.insert(String(UnicodeScalar(scalar)!))
+    /// Every key name the config accepts for the leader chord, mapped to its
+    /// virtual key code.
+    ///
+    /// Core owns this because it is plain data — the `kVK_ANSI_*` constants
+    /// are integers, not AppKit — and because the two halves have to agree:
+    /// a name the parser accepts but the event tap cannot map would parse
+    /// cleanly and then silently leave the old leader bound, the exact
+    /// failure §4.6 forbids. One table means they cannot drift.
+    public static let keyCodesByName: [String: Int64] = {
+        var codes: [String: Int64] = ["space": 49, "tab": 48, "grave": 50, "`": 50]
+        let letters: [Int64] = [
+            0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46,
+            45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6,
+        ]
+        for (offset, scalar) in (UnicodeScalar("a").value...UnicodeScalar("z").value).enumerated() {
+            codes[String(UnicodeScalar(scalar)!)] = letters[offset]
         }
-        for digit in 0...9 {
-            names.insert(String(digit))
+        // ANSI digit row, 0 first.
+        let digits: [Int64] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25]
+        for (digit, code) in digits.enumerated() {
+            codes[String(digit)] = code
         }
-        return names
+        return codes
     }()
+
+    /// Names the config accepts for the leader chord. Anything else gets an
+    /// inline warning and the default leader, so an unbindable leader is
+    /// never a silent no-op and never rejects the rest of the file (§4.6).
+    public static var knownKeyNames: Set<String> { Set(keyCodesByName.keys) }
 }
 
 /// Result of parsing a config file. Every field has the shipped default, so

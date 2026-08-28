@@ -310,12 +310,10 @@ public final class Workspace {
                 if parent.children.indices.contains(nIdx) {
                     let child = parent.children[idx]
                     let neighbor = parent.children[nIdx]
-                    // The clamp range must always contain zero: when a ratio
-                    // already sits below minRatio the naive bounds exclude it
-                    // and a grow request would shrink the window instead.
-                    let lo = min(0, -(child.ratio - minRatio))
-                    let hi = max(0, neighbor.ratio - minRatio)
-                    let applied = min(max(delta, lo), hi)
+                    let applied = Self.clampBracketingZero(
+                        delta,
+                        lower: -(child.ratio - minRatio),
+                        upper: neighbor.ratio - minRatio)
                     guard abs(applied) > 0.0001 else { return false }
                     child.ratio += applied
                     neighbor.ratio -= applied
@@ -327,6 +325,19 @@ public final class Workspace {
         return false
     }
 
+    /// Clamps `delta` into `[lower, upper]` widened so the range always
+    /// contains zero.
+    ///
+    /// A ratio that already sits outside `[minRatio, max]` produces naive
+    /// bounds that exclude zero, and clamping into them inverts the request:
+    /// asking to grow shrinks the window instead. Widening makes the worst
+    /// case a no-op, which the callers then reject as too small to apply.
+    private static func clampBracketingZero(
+        _ delta: CGFloat, lower: CGFloat, upper: CGFloat
+    ) -> CGFloat {
+        min(max(delta, min(0, lower)), max(0, upper))
+    }
+
     /// Grows (positive) or shrinks (negative) the focused window's share of
     /// its parent, redistributing across siblings (⌃⌥-= chords).
     @discardableResult
@@ -334,11 +345,10 @@ public final class Workspace {
         guard let leaf = index[id], let parent = leaf.parent, parent.children.count > 1 else { return false }
         let siblings = parent.children.filter { $0 !== leaf }
         let maxShare = 1 - minRatio * CGFloat(siblings.count)
-        // As in resize: the clamp range must contain zero, or a share already
-        // outside [minRatio, maxShare] inverts the requested direction.
-        let lo = min(0, minRatio - leaf.ratio)
-        let hi = max(0, maxShare - leaf.ratio)
-        let applied = min(max(delta, lo), hi)
+        let applied = Self.clampBracketingZero(
+            delta,
+            lower: minRatio - leaf.ratio,
+            upper: maxShare - leaf.ratio)
         guard abs(applied) > 0.0001 else { return false }
         let donorSum = siblings.reduce(CGFloat(0)) { $0 + $1.ratio }
         guard donorSum > 0 else { return false }

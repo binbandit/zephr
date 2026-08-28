@@ -9,25 +9,44 @@ import ZephrCore
 /// per-key rebinding later.
 @MainActor
 enum ChordHints {
-    /// Display prefix for direct chords, e.g. "⌃⌥"; nil = chords disabled.
-    static var prefix: String? {
+    /// Modifiers the active preset uses for direct chords; nil when the
+    /// preset has none (vim is leader-only). One table, so the strip, the
+    /// palette and the menu can never disagree about what is bound.
+    private static var modifiers: (control: Bool, option: Bool, command: Bool)? {
         switch AppDelegate.shared?.configService.current.keyPreset {
-        case "i3": "⌘⌥"
-        case "aerospace": "⌥"
+        case "i3": (control: false, option: true, command: true)
+        case "aerospace": (control: false, option: true, command: false)
         case "vim": nil
-        default: "⌃⌥"
+        default: (control: true, option: true, command: false)
         }
     }
+
+    /// A chord in Apple's canonical modifier order, ⌃⌥⇧⌘ — so the i3 preset
+    /// renders `⌥⇧⌘H`, not `⌘⌥⇧H`. Rendering the whole chord here rather
+    /// than handing out a prefix to concatenate is what keeps ⇧ in the right
+    /// place when ⌘ is part of the preset.
+    static func chord(_ key: String, shift: Bool = false) -> String? {
+        guard let mods = modifiers else { return nil }
+        var out = ""
+        if mods.control { out += "⌃" }
+        if mods.option { out += "⌥" }
+        if shift { out += "⇧" }
+        if mods.command { out += "⌘" }
+        return out + key
+    }
+
+    /// Display prefix for an unshifted chord, e.g. "⌃⌥".
+    static var prefix: String? { chord("") }
 
     /// Menu-item shortcut modifiers matching the active chords; nil = no
     /// chord equivalents exist (vim preset).
     static var menuModifiers: EventModifiers? {
-        switch AppDelegate.shared?.configService.current.keyPreset {
-        case "i3": [.command, .option]
-        case "aerospace": [.option]
-        case "vim": nil
-        default: [.control, .option]
-        }
+        guard let mods = modifiers else { return nil }
+        var out: EventModifiers = []
+        if mods.control { out.insert(.control) }
+        if mods.option { out.insert(.option) }
+        if mods.command { out.insert(.command) }
+        return out
     }
 }
 
@@ -93,7 +112,8 @@ final class CommandStripController {
         guard let hosting = panel.contentView as? NSHostingView<CommandStripView> else { return }
         hosting.layout()
         let size = hosting.fittingSize
-        let screen = NSScreen.main ?? NSScreen.screens.first
+        let screen = AppDelegate.shared?.engine.focusedScreen
+            ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         let visible = screen.visibleFrame
         let origin = NSPoint(

@@ -12,8 +12,6 @@ public enum AeroSpaceImport {
         /// class). 0 is meaningful: flush tiling imports as flush tiling.
         public var innerGaps: CGFloat?
         public var outerGaps: CGFloat?
-        /// Source-compat alias for callers that predate the inner/outer split.
-        public var gaps: CGFloat? { innerGaps ?? outerGaps }
         public var rules: [WindowRule] = []
         public var imported: [String] = []
         public var skipped: [String] = []

@@ -254,9 +254,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A write to a closed socket must never kill us: the default SIGPIPE
         // disposition terminates the process outright, skipping
         // `applicationWillTerminate` and leaving every stashed window parked
-        // off-screen (invariant 1). `IPCServer.start()` sets this too, but it
-        // only runs after the Accessibility grant — this covers the pre-grant
-        // window and any other pipe we ever write to.
+        // off-screen (invariant 1). Set here rather than in `IPCServer`
+        // because this runs before the Accessibility grant, and covers any
+        // other pipe we ever write to.
         signal(SIGPIPE, SIG_IGN)
 
         // Restore every window on SIGTERM too, not just clean quits (§6.6).
