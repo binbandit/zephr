@@ -47,10 +47,13 @@ public enum StashPlanner {
         ))
 
         for candidate in candidates {
-            let offScreenPart = candidate.subtracting(displayFrame)
-            let collides = others.contains { other in
-                other.intersects(offScreenPart)
-            }
+            // Displays are disjoint and the visible sliver lies inside the
+            // owning display, so any overlap with another display is an
+            // off-screen collision. Testing the candidate directly also
+            // catches windows that protrude past *two* edges (e.g. wider
+            // than the display and hanging below), which a single-edge
+            // protrusion check misses.
+            let collides = others.contains { $0.intersects(candidate) }
             if !collides { return candidate }
         }
 
@@ -76,27 +79,5 @@ public enum StashPlanner {
 extension CGRect {
     var area: CGFloat {
         isNull || isEmpty ? 0 : width * height
-    }
-
-    /// Bounding box of the part of `self` outside `other` — good enough for
-    /// the stash collision check where candidates hang off one edge.
-    func subtracting(_ other: CGRect) -> CGRect {
-        guard intersects(other) else { return self }
-        let inter = intersection(other)
-        // The candidate sticks out past exactly one edge of the display.
-        if maxX > other.maxX {
-            return CGRect(x: other.maxX, y: minY, width: maxX - other.maxX, height: height)
-        }
-        if minX < other.minX {
-            return CGRect(x: minX, y: minY, width: other.minX - minX, height: height)
-        }
-        if maxY > other.maxY {
-            return CGRect(x: minX, y: other.maxY, width: width, height: maxY - other.maxY)
-        }
-        if minY < other.minY {
-            return CGRect(x: minX, y: minY, width: width, height: other.minY - minY)
-        }
-        _ = inter
-        return .zero
     }
 }

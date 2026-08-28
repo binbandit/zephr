@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import CoreGraphics
 @testable import ZephrCore
 
@@ -96,7 +97,7 @@ struct ModelTests {
         #expect(m.workspace(containing: w1) != nil)
     }
 
-    @Test func rescueGathersEverything() {
+    @Test func rescueGathersEverything() throws {
         let m = model()
         m.insertWindow(w1)
         _ = m.activateWorkspace(2)
@@ -107,7 +108,12 @@ struct ModelTests {
         for w in [w1, w2, w3] {
             #expect(m.workspace(containing: w)?.id == 3)
         }
-        try? m.workspace(3).validate()
+        // The sources are drained, the target holds everything, and the
+        // invariants hold on the recovery path (§4.4, invariant 1).
+        #expect(m.workspace(1).isEmpty)
+        #expect(m.workspace(2).isEmpty)
+        #expect(Set(m.workspace(3).allWindows) == [w1, w2, w3])
+        try m.workspace(3).validate()
     }
 
     @Test func removeWindowClearsIndex() {
@@ -143,6 +149,24 @@ struct RuleTests {
         let rules = RuleSet()
         #expect(rules.action(bundleID: "com.example.someapp", title: "Window") == nil)
     }
+
+    @Test func catastrophicBacktrackingPatternStaysWithinTimeBudget() {
+        // `^(a+)+$` against a long run of `a` plus a non-matching tail is the
+        // classic exponential-backtracking bomb: ~2^46 steps if the matcher
+        // runs unbounded, i.e. an implementation without the §6.3 time budget
+        // hangs here for years rather than failing an assertion. The budget
+        // degrades it to "no match" within 50 ms; the elapsed bound is
+        // generous so a loaded CI machine can't flake this test.
+        let rule = WindowRule(bundleID: "com.example.evil", titlePattern: "^(a+)+$", action: .float)
+        let title = String(repeating: "a", count: 46) + "!"
+        let start = Date()
+        let matched = rule.matchesTitle(title)
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(!matched)
+        #expect(elapsed < 2.0, "pathological pattern took \(elapsed)s — the time budget is not working")
+        // Sanity: the budget must not break ordinary matching.
+        #expect(rule.matchesTitle(String(repeating: "a", count: 40)))
+    }
 }
 
 @Suite("Stash planner")
@@ -153,23 +177,27 @@ struct StashTests {
 
     @Test func singleDisplayStashesBelow() {
         let f = StashPlanner.stashFrame(for: win, on: laptop, allDisplays: [laptop])
-        // Sliver-visible at the bottom edge; body below the display.
-        #expect(f.minY == 1000 - StashPlanner.sliver)
+        // Sliver-visible at the bottom edge; body below the display. The
+        // literal pins sliver > 0: a zero sliver parks the window fully
+        // off-screen, where macOS may kill it (window-loss, invariant 1).
+        #expect(StashPlanner.sliver > 0)
+        #expect(f.minY == 999)
+        #expect(f.minY < 1000)
         #expect(StashPlanner.looksStashed(f, displays: [laptop]))
     }
 
     @Test func sideBySideAvoidsTheNeighbor() {
-        // External sits to the right of the laptop: stash must not splash onto it.
+        // External sits to the right of the laptop: the stash frame must not
+        // splash onto it. Displays are disjoint, so any intersection with a
+        // neighboring display is an off-screen collision.
         let f = StashPlanner.stashFrame(for: win, on: laptop, allDisplays: [laptop, external])
-        let offScreen = f.subtracting(laptop)
-        #expect(!offScreen.intersects(external))
+        #expect(!f.intersects(external))
         #expect(StashPlanner.looksStashed(f, displays: [laptop, external]))
     }
 
     @Test func externalDisplayStashesAwayFromLaptop() {
         let f = StashPlanner.stashFrame(for: win, on: external, allDisplays: [laptop, external])
-        let offScreen = f.subtracting(external)
-        #expect(!offScreen.intersects(laptop))
+        #expect(!f.intersects(laptop))
         #expect(StashPlanner.looksStashed(f, displays: [laptop, external]))
     }
 
@@ -177,8 +205,23 @@ struct StashTests {
         // A display directly below the laptop blocks the south candidate.
         let below = CGRect(x: 0, y: 1000, width: 1600, height: 1000)
         let f = StashPlanner.stashFrame(for: win, on: laptop, allDisplays: [laptop, below])
-        let offScreen = f.subtracting(laptop)
-        #expect(!offScreen.intersects(below))
+        #expect(!f.intersects(below))
+        #expect(StashPlanner.looksStashed(f, displays: [laptop, below]))
+    }
+
+    @Test func oversizedWindowProtrudingPastTwoEdgesAvoidsAllNeighbors() {
+        // A window larger than its display protrudes past *two* edges of any
+        // stash candidate — the case the old single-edge protrusion check
+        // (`subtracting`) got wrong. With neighbors east and south, the
+        // planner must reject both collided candidates and park it west.
+        let right = CGRect(x: 1600, y: 0, width: 1000, height: 1000)
+        let below = CGRect(x: 0, y: 1000, width: 1600, height: 1000)
+        let big = CGRect(x: 200, y: 100, width: 1800, height: 900)
+        let f = StashPlanner.stashFrame(for: big, on: laptop, allDisplays: [laptop, right, below])
+        #expect(!f.intersects(right))
+        #expect(!f.intersects(below))
+        #expect(f.size == big.size)
+        #expect(StashPlanner.looksStashed(f, displays: [laptop, right, below]))
     }
 
     @Test func stashPreservesWindowSize() {

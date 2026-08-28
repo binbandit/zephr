@@ -41,7 +41,15 @@ struct PropertyTests {
             for ws in model.workspaces.values {
                 try ws.validate()
             }
-            // Bijection: every live window is in exactly one workspace.
+            // Bijection, both directions: every live window is in exactly one
+            // workspace, and no workspace holds a window that isn't live — a
+            // phantom node left behind by a buggy remove would otherwise be
+            // invisible here (invariant 1 cuts both ways: a ghost entry makes
+            // the engine fight over a window that no longer exists).
+            #expect(
+                Set(model.workspaces.values.flatMap(\.allWindows)) == Set(live),
+                "model window contents diverge from live set (seed \(seed))"
+            )
             for w in live {
                 let holders = model.workspaces.values.filter { $0.contains(w) }
                 #expect(holders.count == 1, "window \(w) in \(holders.count) workspaces (seed \(seed))")
@@ -57,25 +65,47 @@ struct PropertyTests {
             }
         }
 
-        for step in 0..<1200 {
+        // Mixed insert geometry so the split-orientation heuristic's portrait
+        // branch (and its degenerate-frame guard) run during the storm, not
+        // just the landscape default.
+        let insertFrames = [
+            CGRect(x: 100, y: 100, width: 600, height: 400),  // landscape
+            CGRect(x: 200, y: 50, width: 300, height: 800),   // portrait
+            CGRect(x: 0, y: 0, width: 500, height: 500),      // square
+            CGRect(x: 40, y: 40, width: 0, height: 0),        // degenerate
+            CGRect(x: -50, y: 2000, width: 1, height: 900),   // sliver, off-display
+        ]
+
+        // Mutating calls must actually mutate: a build where move/resize/
+        // toggleFloat all return early still "preserves invariants", so the
+        // storm also proves a meaningful fraction of operations succeed.
+        var succeeded = 0
+        var attempted = 0
+
+        for _ in 0..<1200 {
             let op = Int.random(in: 0..<100, using: &rng)
             switch op {
             case 0..<22: // insert
                 let id = WindowID(nextWindow); nextWindow += 1
                 let floating = Int.random(in: 0..<10, using: &rng) == 0
+                attempted += 1
                 model.insertWindow(id, floating: floating,
-                                   frame: CGRect(x: 100, y: 100, width: 600, height: 400))
+                                   frame: insertFrames.randomElement(using: &rng)!)
                 live.append(id)
+                #expect(model.workspace(containing: id) != nil, "insert dropped \(id) (seed \(seed))")
+                succeeded += 1
             case 22..<34: // remove
                 if let id = live.randomElement(using: &rng) {
-                    model.removeWindow(id)
+                    attempted += 1
+                    if model.removeWindow(id) { succeeded += 1 }
                     live.removeAll { $0 == id }
                 }
             case 34..<50: // move directionally
                 if let id = live.randomElement(using: &rng),
                    let dir = Direction.allCases.randomElement(using: &rng),
                    let ws = model.workspace(containing: id) {
-                    _ = ws.move(id, direction: dir)
+                    attempted += 1
+                    if ws.move(id, direction: dir) == .moved { succeeded += 1 }
                 }
             case 50..<60: // focus a random window
                 if let id = live.randomElement(using: &rng) {
@@ -91,16 +121,23 @@ struct PropertyTests {
                 if let id = live.randomElement(using: &rng),
                    let dir = Direction.allCases.randomElement(using: &rng),
                    let ws = model.workspace(containing: id) {
-                    _ = ws.resize(id, direction: dir, delta: 0.05, minRatio: 0.05)
+                    attempted += 1
+                    if ws.resize(id, direction: dir, delta: 0.05, minRatio: 0.05) { succeeded += 1 }
                 }
             case 76..<82: // toggle float
                 if let id = live.randomElement(using: &rng),
                    let ws = model.workspace(containing: id) {
-                    _ = ws.toggleFloat(id, defaultFrame: CGRect(x: 50, y: 50, width: 500, height: 400))
+                    attempted += 1
+                    if ws.toggleFloat(id, defaultFrame: CGRect(x: 50, y: 50, width: 500, height: 400)) != nil {
+                        succeeded += 1
+                    }
                 }
             case 82..<88: // send to workspace
                 if let id = live.randomElement(using: &rng) {
-                    _ = model.moveWindow(id, toWorkspace: Int.random(in: 1...9, using: &rng))
+                    attempted += 1
+                    if model.moveWindow(id, toWorkspace: Int.random(in: 1...9, using: &rng)) {
+                        succeeded += 1
+                    }
                 }
             case 88..<94: // switch workspace
                 _ = model.activateWorkspace(Int.random(in: 1...9, using: &rng))
@@ -125,9 +162,18 @@ struct PropertyTests {
             }
 
             solveAll()
-            if step % 50 == 0 { try validateAll() }
+            // Validate every step: corruption must be reported at the
+            // operation that caused it, not up to 49 operations later.
+            try validateAll()
         }
-        try validateAll()
+
+        // ~700 of 1200 steps attempt a mutation; the storm is degenerate if
+        // most of them no-op. The floor is far below the observed ~85% so a
+        // distribution shift can't flake it, while a mass-early-return build
+        // still fails loudly.
+        #expect(attempted > 500, "only \(attempted) mutating attempts (seed \(seed))")
+        #expect(succeeded * 2 > attempted,
+                "only \(succeeded)/\(attempted) mutating operations took effect (seed \(seed))")
 
         // Grand finale: the rescue command reaches every window (§4.4).
         model.syncDisplays([d1, d2])

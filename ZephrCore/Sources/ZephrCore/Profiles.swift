@@ -13,9 +13,17 @@ import CoreGraphics
 public struct DisplaySlot: Sendable, Equatable {
     public let id: DisplayID
     public let frame: CGRect
-    public init(id: DisplayID, frame: CGRect) {
+    /// Opaque, caller-supplied stable identity for the physical panel —
+    /// e.g. a digest of CGDisplayVendorNumber/ModelNumber/SerialNumber
+    /// (§4.5 "identifier"). ZephrCore never reads display hardware itself;
+    /// the app passes this at the boundary. `nil` keeps the geometry-only
+    /// fingerprint, so two same-geometry sites collide (pre-identity
+    /// behavior).
+    public let identity: String?
+    public init(id: DisplayID, frame: CGRect, identity: String? = nil) {
         self.id = id
         self.frame = frame
+        self.identity = identity
     }
 }
 
@@ -65,13 +73,31 @@ public struct ModelSnapshot: Codable, Sendable {
 
 public enum ProfileEngine {
 
-    /// Stable across reboots: geometry only, order-normalized. Display IDs
-    /// are deliberately excluded — CGDirectDisplayIDs churn between boots.
+    /// Stable across reboots: order-normalized geometry plus each slot's
+    /// caller-supplied stable identity (§4.5 identifier + resolution +
+    /// arrangement). CGDirectDisplayIDs churn between boots and are
+    /// deliberately excluded; `DisplaySlot.identity` is the stable stand-in
+    /// that keeps two same-geometry sites (same laptop, different 1440p at
+    /// home vs. office) from colliding. Slots without an identity produce
+    /// the historical geometry-only form, so existing stored profiles for
+    /// integral-geometry arrangements keep their keys.
     public static func fingerprint(_ slots: [DisplaySlot]) -> String {
         slots
-            .map { "\(Int($0.frame.width))x\(Int($0.frame.height))@\(Int($0.frame.minX)),\(Int($0.frame.minY))" }
+            .map { slot in
+                let f = slot.frame
+                let geo = "\(fmt(f.width))x\(fmt(f.height))@\(fmt(f.minX)),\(fmt(f.minY))"
+                guard let identity = slot.identity, !identity.isEmpty else { return geo }
+                return "\(geo)#\(identity.replacingOccurrences(of: "|", with: "_"))"
+            }
             .sorted()
             .joined(separator: "|")
+    }
+
+    /// Integral values keep their historical `Int` rendering (existing
+    /// fingerprints stay valid); fractional values render in full instead of
+    /// truncating, so sub-point differences no longer collapse.
+    private static func fmt(_ v: CGFloat) -> String {
+        v == v.rounded() ? String(Int(v)) : String(describing: v)
     }
 
     private static func orderedSlots(_ slots: [DisplaySlot]) -> [DisplaySlot] {
@@ -157,8 +183,14 @@ public enum ProfileEngine {
 
     /// Rebuilds the model from a snapshot, matching live windows to recorded
     /// fingerprints — exact (bundleID, title) first, then bundleID-only in
-    /// FIFO order. Returns live windows the profile didn't place (the caller
-    /// re-inserts them normally); unmatched recorded windows are dropped.
+    /// FIFO order. Returns every window that was under management going in
+    /// (whether passed in `live` or already present in the model) that did
+    /// not land in the rebuilt model, in ascending id order — the caller
+    /// re-inserts each one so nothing silently leaves management (invariant
+    /// 1, §4.5). Unmatched *recorded* windows (fingerprints with no live
+    /// counterpart) are dropped. Snapshot entries outside workspaces 1–9 and
+    /// window indices referenced more than once are ignored; their windows
+    /// come back through the unplaced return.
     @discardableResult
     public static func apply(
         _ snapshot: ModelSnapshot,
@@ -204,14 +236,24 @@ public enum ProfileEngine {
             }
         }
 
+        // Everything under management before the rebuild: whatever doesn't
+        // land in the rebuilt model must be handed back (invariant 1).
+        let previouslyManaged = Set(model.windowWorkspace.keys)
+
         // Reset model membership and rebuild workspaces from the snapshot.
         model.workspaces.removeAll()
         model.windowWorkspace.removeAll()
         model.activeWorkspaceByDisplay.removeAll()
 
+        // Each snapshot window index may be materialized at most once: a
+        // corrupt snapshot referencing one index from two trees would
+        // otherwise put a single WindowID into two workspaces.
+        var usedIndices = Set<Int>()
+
         func rebuild(_ node: NodeSnapshot) -> TreeNode? {
             if let windowIndex = node.window {
-                guard let id = matched[windowIndex] else { return nil }
+                guard let id = matched[windowIndex],
+                      usedIndices.insert(windowIndex).inserted else { return nil }
                 let leaf = TreeNode(window: id)
                 leaf.ratio = node.ratio
                 return leaf
@@ -230,6 +272,11 @@ public enum ProfileEngine {
         }
 
         for wsSnapshot in snapshot.workspaces {
+            // Only workspaces 1–9 exist (§4.4) — a corrupt id would create a
+            // workspace no keybinding can reach. Skipping (rather than
+            // clamping) avoids overwriting a legitimate workspace's snapshot;
+            // the skipped windows come back through the unplaced return.
+            guard (1...9).contains(wsSnapshot.id) else { continue }
             let ws = model.workspace(wsSnapshot.id)
             ws.name = wsSnapshot.name
             ws.floatByDefault = wsSnapshot.floatByDefault
@@ -240,7 +287,8 @@ public enum ProfileEngine {
 
             let root = wsSnapshot.root.flatMap(rebuild) ?? TreeNode(container: .horizontal)
             let floats: [(WindowID, CGRect)] = wsSnapshot.floats.compactMap {
-                guard let id = matched[$0.window] else { return nil }
+                guard let id = matched[$0.window],
+                      usedIndices.insert($0.window).inserted else { return nil }
                 return (id, $0.frame)
             }
             let focused = wsSnapshot.focused.flatMap { matched[$0] }
@@ -252,7 +300,7 @@ public enum ProfileEngine {
         }
 
         for (slotIndex, wsID) in snapshot.activeBySlot {
-            guard ordered.indices.contains(slotIndex) else { continue }
+            guard ordered.indices.contains(slotIndex), (1...9).contains(wsID) else { continue }
             model.activeWorkspaceByDisplay[ordered[slotIndex].id] = wsID
             model.workspace(wsID).homeDisplay = ordered[slotIndex].id
         }
@@ -260,6 +308,13 @@ public enum ProfileEngine {
         // Re-derive per-display state for anything the snapshot missed.
         model.syncDisplays(slots.map(\.id))
 
-        return live.keys.filter { !claimed.contains($0) }.sorted { $0.raw < $1.raw }
+        // Hand back everything that didn't land in the rebuilt model — NOT
+        // "everything unclaimed": a window can be claimed by the matcher yet
+        // referenced by no tree node, and a previously-managed window can be
+        // absent from `live` entirely. Both must reach the caller (invariant 1).
+        let placed = Set(model.windowWorkspace.keys)
+        return previouslyManaged.union(live.keys)
+            .subtracting(placed)
+            .sorted { $0.raw < $1.raw }
     }
 }
