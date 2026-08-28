@@ -66,14 +66,9 @@ final class IPCServer {
     }
 
     func start() {
-        // A peer that pipes us into `head` and exits must never kill the
-        // app: SIGPIPE's default action terminates without running
-        // applicationWillTerminate/shutdownRestore, stranding every
-        // stashed window off-screen ("never lose a window"). Ignore it
-        // process-wide — writes report EPIPE instead — and set
-        // SO_NOSIGPIPE on every fd as belt and braces.
-        signal(SIGPIPE, SIG_IGN)
-
+        // NB: SIGPIPE is ignored process-wide in the app delegate, which
+        // runs before the Accessibility grant and so covers more than this
+        // server. Every fd here still gets SO_NOSIGPIPE as belt and braces.
         let path = Self.socketPath
         // Same-user peers are trusted by design (§4.8 — zephrctl is a
         // local tool for the logged-in user; peer WMs' sockets behave the

@@ -76,6 +76,17 @@ final class DisplayService {
     }
 
     /// Current displays, primary first then left-to-right, in CG coordinates.
+    /// The `NSScreen` backing a display id.
+    ///
+    /// Overlays place themselves in Cocoa coordinates, so they need the
+    /// screen object rather than the engine's global-CG rects.
+    static func screen(for id: DisplayID) -> NSScreen? {
+        NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
+                .uint32Value == id.raw
+        }
+    }
+
     func current() -> [DisplayInfo] {
         let screens = NSScreen.screens
         guard let primary = screens.first(where: { $0.frame.origin == .zero }) ?? screens.first else {

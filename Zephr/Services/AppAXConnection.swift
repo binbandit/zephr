@@ -25,6 +25,9 @@ actor AppAXConnection {
     private var windows: [WindowID: AXElement] = [:]
     private var nextSequence: UInt64 = 1
 
+    /// Highest frame-batch generation this connection has run.
+    private var writeGeneration: UInt64 = 0
+
     /// Degraded-app bookkeeping (§6.3): after a timeout, skip the app briefly.
     private var degradedUntil: ContinuousClock.Instant?
     private var timeoutStrikes = 0
@@ -97,21 +100,33 @@ actor AppAXConnection {
         windows[id]
     }
 
+    /// Every window element the app currently reports, each stamped with the
+    /// §6.3 messaging deadline — a fresh token otherwise runs at the global
+    /// default.
+    ///
+    /// `timedOut` keeps "the app did not answer" distinct from "the app has
+    /// no windows". Conflating them makes a busy app look like one whose
+    /// windows all vanished, which is how managed windows get purged.
+    private func currentWindowElements() -> (timedOut: Bool, elements: [AXElement]) {
+        let (err, value) = app.attributeResult(kAXWindowsAttribute)
+        if err == .cannotComplete { return (true, []) }
+        guard let items = value as? [AnyObject] else { return (false, []) }
+        return (false, items.compactMap {
+            guard CFGetTypeID($0) == AXUIElementGetTypeID() else { return nil }
+            let el = AXElement($0 as! AXUIElement)
+            el.setMessagingTimeout(AXElement.messagingDeadline)
+            return el
+        })
+    }
+
     func listWindows() -> [AXElement] {
         guard !isDegraded else { return [] }
-        let (err, value) = app.attributeResult(kAXWindowsAttribute)
-        if err == .cannotComplete {
+        let (timedOut, elements) = currentWindowElements()
+        if timedOut {
             noteTimeout()
             return []
         }
-        guard let items = value as? [AnyObject] else { return [] }
-        return items.compactMap {
-            guard CFGetTypeID($0) == AXUIElementGetTypeID() else { return nil }
-            let el = AXElement($0 as! AXUIElement)
-            // Fresh tokens run at the global default without this (§6.3).
-            el.setMessagingTimeout(AXElement.messagingDeadline)
-            return el
-        }
+        return elements
     }
 
     func snapshot(_ element: AXElement) -> WindowSnapshot? {
@@ -149,13 +164,30 @@ actor AppAXConnection {
     struct WriteResult: Sendable {
         var applied: [WindowID: CGRect] = [:]   // read-back frames
         var vetoed: Set<WindowID> = []          // app refused the frame
+        /// A newer batch for this app already ran, so nothing was written
+        /// and the empty `applied` says nothing about the app's health.
+        var superseded = false
     }
 
     /// Applies a batch of frames with write coalescing (§6.3): no-op writes
     /// are skipped by the caller; Electron's AXEnhancedUserInterface is
     /// disabled around the batch (§6.4); each write is verified by read-back.
-    func applyFrames(_ batch: [(WindowID, CGRect)]) -> WriteResult {
+    ///
+    /// `generation` orders batches. Each apply reaches this actor on its own
+    /// task, and separate tasks are *not* delivered in the order they were
+    /// created — so two applies issued A-then-B can run B-then-A, leaving
+    /// windows at A's stale targets. The caller then records those as
+    /// applied, the no-op filter skips them next time and the drift check
+    /// compares against the same wrong expectation, so the mistake sticks
+    /// instead of self-correcting. Batches older than the newest seen are
+    /// dropped rather than written.
+    func applyFrames(_ batch: [(WindowID, CGRect)], generation: UInt64 = 0) -> WriteResult {
         var result = WriteResult()
+        guard generation == 0 || generation >= writeGeneration else {
+            result.superseded = true
+            return result
+        }
+        writeGeneration = max(writeGeneration, generation)
         guard !isDegraded, !batch.isEmpty else { return result }
 
         // Electron/Chromium workaround: frames misapply while the app has
@@ -346,21 +378,13 @@ actor AppAXConnection {
         }
 
         // Windows that exist but were never adopted (missed creation events).
-        let (err, value) = app.attributeResult(kAXWindowsAttribute)
-        if err == .cannotComplete {
+        let (timedOut, elements) = currentWindowElements()
+        if timedOut {
             noteTimeout()
             return result
         }
         let known = Set(windows.values)
-        if let items = value as? [AnyObject] {
-            for item in items {
-                guard CFGetTypeID(item) == AXUIElementGetTypeID() else { continue }
-                let el = AXElement(item as! AXUIElement)
-                guard !known.contains(el) else { continue }
-                el.setMessagingTimeout(AXElement.messagingDeadline)   // §6.3
-                result.unknown.append(el)
-            }
-        }
+        result.unknown = elements.filter { !known.contains($0) }
         noteSuccess()
         return result
     }

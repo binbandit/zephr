@@ -98,10 +98,9 @@ final class PaletteController {
     func show() {
         guard let engine else { return }
         model.all = Self.catalog(engine: engine)
-        model.query = ""
-        model.refilter()
+        model.query = ""   // didSet refilters against the fresh catalog
 
-        let screen = NSScreen.main ?? NSScreen.screens.first
+        let screen = engine.focusedScreen ?? NSScreen.main ?? NSScreen.screens.first
         guard let visible = screen?.visibleFrame else { return }
         let size = NSSize(width: 560, height: 380)
         panel.setFrame(
@@ -141,9 +140,8 @@ final class PaletteController {
         }
         // §4.2: chord hints follow the active key preset; vim (no chords)
         // falls back to the leader-layer keys.
-        let prefix = ChordHints.prefix
-        func chord(_ keys: String, orLeader leader: String) -> String {
-            prefix.map { $0 + keys } ?? leader
+        func chord(_ key: String, shift: Bool = false, orLeader leader: String) -> String {
+            ChordHints.chord(key, shift: shift) ?? leader
         }
         let commands: [(Command, String)] = [
             (.toggleFloat, chord("T", orLeader: "leader t")),
@@ -158,10 +156,10 @@ final class PaletteController {
             (.focus(.down), chord("J", orLeader: "leader j")),
             (.focus(.up), chord("K", orLeader: "leader k")),
             (.focus(.right), chord("L", orLeader: "leader l")),
-            (.move(.left), chord("⇧H", orLeader: "leader ⇧h")),
-            (.move(.down), chord("⇧J", orLeader: "leader ⇧j")),
-            (.move(.up), chord("⇧K", orLeader: "leader ⇧k")),
-            (.move(.right), chord("⇧L", orLeader: "leader ⇧l")),
+            (.move(.left), chord("H", shift: true, orLeader: "leader ⇧h")),
+            (.move(.down), chord("J", shift: true, orLeader: "leader ⇧j")),
+            (.move(.up), chord("K", shift: true, orLeader: "leader ⇧k")),
+            (.move(.right), chord("L", shift: true, orLeader: "leader ⇧l")),
         ]
         entries.append(contentsOf: commands.map { .command($0.0, keys: $0.1) })
         return entries

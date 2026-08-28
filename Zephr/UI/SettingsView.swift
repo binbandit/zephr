@@ -384,11 +384,9 @@ private struct RulesSettings: View {
     }
 
     private func refresh() {
-        // Give the hot reload a beat to re-parse after a write.
-        Task {
-            try? await Task.sleep(for: .milliseconds(250))
-            userRules = config?.current.userRules ?? []
-        }
+        // `ConfigService.write` reloads and reparses before it returns, so
+        // `current` is already the post-write state — no need to race the
+        // file watcher's debounced reload for it.
         userRules = config?.current.userRules ?? []
     }
 
