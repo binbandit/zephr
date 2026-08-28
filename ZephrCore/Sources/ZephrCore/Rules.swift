@@ -119,15 +119,24 @@ public struct RuleSet: Sendable {
         self.builtinRules = builtinRules
     }
 
+    /// First match wins, user rules before the shipped list.
+    ///
+    /// The two arrays are walked in turn rather than concatenated: this runs
+    /// on the per-window event path, and `userRules + builtinRules` built a
+    /// throwaway array — retaining every compiled `NSRegularExpression` in
+    /// it — on each call (§6.3).
     public func action(bundleID: String?, title: String?) -> WindowRule.Action? {
         guard let bundleID else { return nil }
-        for rule in userRules + builtinRules where rule.bundleID == bundleID {
-            if rule.titlePattern != nil {
-                guard let title, rule.matchesTitle(title) else { continue }
+        func firstMatch(in rules: [WindowRule]) -> WindowRule.Action? {
+            for rule in rules where rule.bundleID == bundleID {
+                if rule.titlePattern != nil {
+                    guard let title, rule.matchesTitle(title) else { continue }
+                }
+                return rule.action
             }
-            return rule.action
+            return nil
         }
-        return nil
+        return firstMatch(in: userRules) ?? firstMatch(in: builtinRules)
     }
 
     /// The shipped rules database (§4.3). Curated starter set; grows via

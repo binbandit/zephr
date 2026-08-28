@@ -146,7 +146,7 @@ struct SolverDegenerateTests {
     private func expectSane(_ result: PlacementSet, within rect: CGRect, context: String) {
         for (id, p) in result.placements {
             let f = p.frame
-            let finite = f.origin.x.isFinite && f.origin.y.isFinite && f.width.isFinite && f.height.isFinite
+            let finite = f.isFinite
             #expect(finite, "\(context): non-finite frame \(f) for \(id)")
             #expect(f.width >= 0 && f.height >= 0, "\(context): negative size \(f) for \(id)")
             guard finite else { continue }
@@ -234,5 +234,26 @@ struct CoordinateTests {
         let global = cocoaToGlobal(cocoa, primaryDisplayHeight: primaryHeight)
         #expect(global == CGRect(x: 100, y: 300, width: 800, height: 500))
         #expect(globalToCocoa(global, primaryDisplayHeight: primaryHeight) == cocoa)
+    }
+}
+
+@Suite("Solver — degenerate rects are refused, not laid out")
+struct SolverDegenerateRectTests {
+
+    /// `.null` is rejected by the finiteness clause alone; `.infinite` is
+    /// not, because its components are ±greatestFiniteMagnitude. Both must
+    /// still produce no placements — this pins the reason the guard has two
+    /// clauses rather than three.
+    @Test(arguments: [CGRect.null, CGRect.infinite])
+    func degenerateWorkspaceRectsProduceNoPlacements(_ rect: CGRect) {
+        let ws = Workspace(id: 1)
+        ws.insertTiled(w1)
+        ws.insertTiled(w2)
+        #expect(Solver.solve(workspace: ws, in: rect).placements.isEmpty)
+    }
+
+    @Test func nullIsAlreadyCaughtByFiniteness() {
+        #expect(!CGRect.null.isFinite, "isFinite must reject .null, or the guard needs !isNull back")
+        #expect(CGRect.infinite.isFinite, "the !isInfinite clause exists precisely because this is true")
     }
 }
