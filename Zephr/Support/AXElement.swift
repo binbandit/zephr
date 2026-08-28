@@ -22,12 +22,38 @@ nonisolated struct AXElement: @unchecked Sendable, Hashable {
         AXElement(AXUIElementCreateApplication(pid))
     }
 
+    /// The system-wide accessibility object.
+    static let systemWide = AXElement(AXUIElementCreateSystemWide())
+
+    /// The §6.3 deadline on every AX call, in seconds.
+    static let messagingDeadline: Float = 0.25
+
+    /// Installs the process-global messaging-timeout floor (§6.3). Per
+    /// AXUIElement.h: "Pass the system-wide accessibility object … if you
+    /// want to set the timeout globally for this process. Setting the
+    /// timeout on another accessibility object sets it only for that
+    /// object, not for other accessibility objects that are equal to it."
+    /// So the timeout set on an app element does NOT cascade to its window
+    /// or button elements — this floor plus an explicit per-element
+    /// deadline as each element enters its connection are BOTH required.
+    /// Do not "simplify" either half away.
+    static let globalTimeoutFloor: Void = {
+        systemWide.setMessagingTimeout(messagingDeadline)
+    }()
+
     // MARK: - Attribute access (call only from the owning connection actor)
 
     func attribute(_ name: String) -> CFTypeRef? {
+        attributeResult(name).value
+    }
+
+    /// Attribute read that surfaces the AXError, letting the owning
+    /// connection distinguish a messaging timeout (`.cannotComplete`, §6.3)
+    /// from a plain missing attribute.
+    func attributeResult(_ name: String) -> (error: AXError, value: CFTypeRef?) {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(raw, name as CFString, &value) == .success else { return nil }
-        return value
+        let error = AXUIElementCopyAttributeValue(raw, name as CFString, &value)
+        return (error, error == .success ? value : nil)
     }
 
     func string(_ name: String) -> String? {
@@ -70,11 +96,28 @@ nonisolated struct AXElement: @unchecked Sendable, Hashable {
         return CGRect(origin: origin, size: sz)
     }
 
-    /// Whether the element is still backed by a live UI object.
-    var isAlive: Bool {
+    /// Result of the cheap liveness probe (§6.4). Only
+    /// `kAXErrorInvalidUIElement` means the backing UI object is gone;
+    /// `.cannotComplete` is a messaging timeout — the app is busy, NOT dead
+    /// (§6.3), and conflating the two would purge every window of any app
+    /// that blocks its main thread for a moment (invariant 1).
+    enum Liveness {
+        case alive, dead, unresponsive
+    }
+
+    var liveness: Liveness {
         var value: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(raw, kAXRoleAttribute as CFString, &value)
-        return err != .invalidUIElement && err != .cannotComplete
+        switch AXUIElementCopyAttributeValue(raw, kAXRoleAttribute as CFString, &value) {
+        case .invalidUIElement: return .dead
+        case .cannotComplete: return .unresponsive
+        default: return .alive
+        }
+    }
+
+    /// Whether the element is still backed by a live UI object. Dead means
+    /// `kAXErrorInvalidUIElement` only (§6.4) — a timeout is never death.
+    var isAlive: Bool {
+        liveness != .dead
     }
 
     @discardableResult
