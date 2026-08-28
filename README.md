@@ -45,5 +45,5 @@ just release            # archive → Developer ID export → DMG → notarize
 
 The engine (`ZephrCore/`) is a pure Swift package — tree, solver, workspaces,
 profiles — fully unit-tested including property tests. The app (`Zephr/`) is the
-AX/AppKit shell around it. Architecture notes live in [CLAUDE.md](CLAUDE.md) and
+AX/AppKit shell around it. Architecture notes live in [CONTRIBUTING.md](CONTRIBUTING.md) and
 the full product spec in [docs/DESIGN.md](docs/DESIGN.md).
