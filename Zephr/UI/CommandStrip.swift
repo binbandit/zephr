@@ -2,6 +2,35 @@ import AppKit
 import SwiftUI
 import ZephrCore
 
+/// Chord hints shown in the UI must reflect the active key preset (§4.2) —
+/// ⌃⌥ by default, ⌘⌥ under i3, bare ⌥ under aerospace, none under vim
+/// (leader-only). Derived from the config because `HotkeyService` keeps its
+/// `chordMods` private; a read-only accessor there would let this follow
+/// per-key rebinding later.
+@MainActor
+enum ChordHints {
+    /// Display prefix for direct chords, e.g. "⌃⌥"; nil = chords disabled.
+    static var prefix: String? {
+        switch AppDelegate.shared?.configService.current.keyPreset {
+        case "i3": "⌘⌥"
+        case "aerospace": "⌥"
+        case "vim": nil
+        default: "⌃⌥"
+        }
+    }
+
+    /// Menu-item shortcut modifiers matching the active chords; nil = no
+    /// chord equivalents exist (vim preset).
+    static var menuModifiers: EventModifiers? {
+        switch AppDelegate.shared?.configService.current.keyPreset {
+        case "i3": [.command, .option]
+        case "aerospace": [.option]
+        case "vim": nil
+        default: [.control, .option]
+        }
+    }
+}
+
 /// The which-key command strip (§4.2): a translucent HUD that appears
 /// bottom-center the moment the leader is pressed, showing what every key
 /// does. `?` expands it into the full cheat sheet.
@@ -36,6 +65,9 @@ final class CommandStripController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
+        // Purely informational — it must never swallow clicks meant for the
+        // windows underneath (§4.2).
+        panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: CommandStripView(model: model))
     }
@@ -136,7 +168,13 @@ struct CommandStripView: View {
             GridRow { sheetItem("r", "Resize mode"); sheetItem("=", "Balance sizes") }
             GridRow { sheetItem("q", "Close window"); sheetItem("p", "Palette") }
             GridRow { sheetItem("tab", "Next display"); sheetItem("w", "Rescue all windows") }
-            GridRow { sheetItem("esc / leader", "Close layer"); sheetItem("⌃⌥ …", "Same, without leader") }
+            GridRow {
+                sheetItem("esc / leader", "Close layer")
+                // §4.2: the hint tracks the active preset; vim has no chords.
+                if let prefix = ChordHints.prefix {
+                    sheetItem("\(prefix) …", "Same, without leader")
+                }
+            }
         }
     }
 

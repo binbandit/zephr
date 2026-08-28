@@ -7,6 +7,42 @@ import ZephrCore
 /// config.toml through the targeted editor, so hand-edits and the GUI never
 /// fight. "Fully usable without ever opening Settings, and fully
 /// configurable without ever opening Settings" (§5) — this is the second half.
+/// A binding that persists only on user edits: `onAppear` seeding assigns the
+/// `@State` directly and never reaches the setter, so merely opening Settings
+/// can't rewrite the config or flip real state — §4.6's round-trip guarantee
+/// ("except the keys actually changed"). `onChange` cannot make that
+/// distinction: it fires for programmatic seeding too.
+private func writeThrough<T>(_ state: Binding<T>, _ write: @escaping (T) -> Void) -> Binding<T> {
+    Binding(
+        get: { state.wrappedValue },
+        set: { state.wrappedValue = $0; write($0) }
+    )
+}
+
+/// A slider that previews live and writes once, on release.
+///
+/// Writing per step rewrites, re-parses and re-applies the whole config —
+/// a full desktop re-layout — on every one of the ~30 stops in a single
+/// drag. That is a main-thread stall §6.3 forbids outright, and a long
+/// enough one gets the event tap killed with `kCGEventTapDisabledByTimeout`,
+/// taking the keyboard with it. Binding straight to `@State` also means
+/// `onAppear` seeding cannot write, the same guarantee `writeThrough` gives.
+private struct CommittingSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let label: (Double) -> String
+    let commit: (Double) -> Void
+
+    var body: some View {
+        Slider(value: $value, in: range, step: step) {
+            Text(label(value))
+        } onEditingChanged: { editing in
+            if !editing { commit(value) }
+        }
+    }
+}
+
 struct SettingsView: View {
     var body: some View {
         TabView {
@@ -27,7 +63,9 @@ struct SettingsView: View {
 
 private struct WorkspacesSettings: View {
     @State private var names: [Int: String] = [:]
+    @State private var savedNames: [Int: String] = [:]
     @State private var floatDefaults: Set<Int> = []
+    @FocusState private var focusedRow: Int?
 
     private var config: ConfigService? { AppDelegate.shared?.configService }
 
@@ -40,6 +78,7 @@ private struct WorkspacesSettings: View {
                 HStack {
                     Text("\(n)").monospacedDigit().frame(width: 18)
                     TextField("name", text: binding(for: n))
+                        .focused($focusedRow, equals: n)
                         .onSubmit { commitName(n) }
                     Toggle("Float", isOn: floatBinding(for: n))
                         .toggleStyle(.checkbox)
@@ -47,9 +86,14 @@ private struct WorkspacesSettings: View {
             }
         }
         .padding(20)
+        // Enter-only commits lose edits — commit on focus loss too (§4.6).
+        .onChange(of: focusedRow) { old, _ in
+            if let old { commitName(old) }
+        }
         .onAppear {
             guard let current = config?.current else { return }
             names = current.workspaceNames
+            savedNames = current.workspaceNames
             floatDefaults = Set(current.floatByDefaultWorkspaces)
         }
     }
@@ -60,8 +104,12 @@ private struct WorkspacesSettings: View {
 
     private func commitName(_ n: Int) {
         let name = (names[n] ?? "").trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        config?.setValue(section: "workspaces", key: "\(n)", value: "\"\(name)\"")
+        // Only write what actually changed (§4.6); empty clears the name.
+        // (True key removal needs a ConfigService `removeValue`; an empty
+        // string parses cleanly and the UI treats it as unnamed.)
+        guard name != (savedNames[n] ?? "") else { return }
+        savedNames[n] = name
+        config?.setValue(section: "workspaces", key: "\(n)", value: ConfigEdit.tomlQuoted(name))
     }
 
     private func floatBinding(for n: Int) -> Binding<Bool> {
@@ -102,6 +150,7 @@ private struct ProfilesSettings: View {
                             Image(systemName: "trash")
                         }
                         .buttonStyle(.borderless)
+                        .accessibilityLabel("Delete profile \(profile.fingerprint)")
                     }
                 }
                 if profiles.isEmpty {
@@ -129,42 +178,56 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
-            Picker("Leader key:", selection: $leader) {
+            Picker("Leader key:", selection: writeThrough($leader) { config?.setLeader($0) }) {
                 Text("⌥ Space").tag("alt-space")
                 Text("⌃⌥ Space").tag("ctrl-alt-space")
                 Text("⌘⌥ Space").tag("cmd-alt-space")
             }
-            .onChange(of: leader) { _, new in config?.setLeader(new) }
 
-            Picker("Key preset:", selection: $preset) {
+            Picker("Key preset:", selection: writeThrough($preset) {
+                config?.setValue(section: "keys", key: "preset", value: "\"\($0)\"")
+            }) {
                 Text("Default (⌃⌥ chords)").tag("default")
                 Text("i3 (⌘⌥ chords)").tag("i3")
                 Text("AeroSpace (bare ⌥ — breaks ⌥-typing)").tag("aerospace")
                 Text("Vim (leader only, no chords)").tag("vim")
             }
-            .onChange(of: preset) { _, new in
-                config?.setValue(section: "keys", key: "preset", value: "\"\(new)\"")
-            }
 
-            Toggle("Launch at login", isOn: $launchAtLogin)
-                .onChange(of: launchAtLogin) { _, _ in
-                    AppDelegate.shared?.toggleLaunchAtLogin()
-                }
+            Toggle("Launch at login", isOn: writeThrough($launchAtLogin) {
+                AppDelegate.shared?.setLaunchAtLogin($0)
+            })
 
-            Toggle("Show menu bar icon", isOn: $menuBarIcon)
-                .onChange(of: menuBarIcon) { _, new in
-                    config?.setValue(section: nil, key: "menu-bar-icon", value: new ? "true" : "false")
+            Toggle("Show menu bar icon", isOn: Binding(
+                get: { menuBarIcon },
+                set: { on in
+                    menuBarIcon = on
+                    if !on && !dockIcon {
+                        // §5: never let the GUI hide every surface at once —
+                        // an LSUIElement app with no status item, no Dock
+                        // icon, and no window is unreachable.
+                        dockIcon = true
+                        config?.setValue(section: nil, key: "dock-icon", value: "true")
+                    }
+                    config?.setValue(section: nil, key: "menu-bar-icon", value: on ? "true" : "false")
                 }
+            ))
             if !menuBarIcon {
-                Text("With the icon hidden, reach Zephr via hotkeys, zephrctl, or this window (⌘, from the palette's app).")
+                Text("With the icon hidden, the Dock icon stays on so Zephr remains reachable. Bring the icon back anytime with menu-bar-icon = true in ~/.config/zephr/config.toml.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
 
-            Toggle("Show Dock icon", isOn: $dockIcon)
-                .onChange(of: dockIcon) { _, new in
-                    config?.setValue(section: nil, key: "dock-icon", value: new ? "true" : "false")
+            Toggle("Show Dock icon", isOn: Binding(
+                get: { dockIcon },
+                set: { on in
+                    dockIcon = on
+                    if !on && !menuBarIcon {
+                        menuBarIcon = true
+                        config?.setValue(section: nil, key: "menu-bar-icon", value: "true")
+                    }
+                    config?.setValue(section: nil, key: "dock-icon", value: on ? "true" : "false")
                 }
+            ))
 
             LabeledContent("Config file:") {
                 Button("Open in Editor") { config?.openInEditor() }
@@ -188,7 +251,11 @@ private struct GeneralSettings: View {
         .onAppear {
             guard let current = config?.current else { return }
             let l = current.leader
-            leader = [l.control ? "ctrl" : nil, l.option ? "alt" : nil, l.command ? "cmd" : nil, l.key]
+            // Canonical modifier order, matching the Picker tags: a fixed
+            // ctrl/alt/cmd order rendered ⌘⌥ Space as "alt-cmd-space" — no
+            // tag matched, the Picker went blank, and the mismatch rewrote
+            // the config with the malformed string.
+            leader = [l.control ? "ctrl" : nil, l.command ? "cmd" : nil, l.option ? "alt" : nil, l.key]
                 .compactMap { $0 }.joined(separator: "-")
             preset = current.keyPreset
             launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -208,31 +275,27 @@ private struct LayoutSettings: View {
 
     var body: some View {
         Form {
-            Slider(value: $gaps, in: 0...32, step: 1) {
-                Text("Gaps: \(Int(gaps)) pt")
-            }
-            .onChange(of: gaps) { _, new in
-                config?.setValue(section: "layout", key: "gaps", value: "\(Int(new))")
-            }
+            CommittingSlider(
+                value: $gaps, range: 0...32, step: 1,
+                label: { "Gaps: \(Int($0)) pt" },
+                commit: { config?.setValue(section: "layout", key: "gaps", value: "\(Int($0))") }
+            )
 
-            Slider(value: $accordionPadding, in: 16...96, step: 4) {
-                Text("Accordion sliver: \(Int(accordionPadding)) pt")
-            }
-            .onChange(of: accordionPadding) { _, new in
-                config?.setValue(section: "layout", key: "accordion-padding", value: "\(Int(new))")
-            }
+            CommittingSlider(
+                value: $accordionPadding, range: 16...96, step: 4,
+                label: { "Accordion sliver: \(Int($0)) pt" },
+                commit: { config?.setValue(section: "layout", key: "accordion-padding", value: "\(Int($0))") }
+            )
 
-            Toggle("Focused-window border", isOn: $focusBorder)
-                .onChange(of: focusBorder) { _, new in
-                    config?.setValue(section: "layout", key: "focus-border", value: new ? "true" : "false")
-                }
+            Toggle("Focused-window border", isOn: writeThrough($focusBorder) {
+                config?.setValue(section: "layout", key: "focus-border", value: $0 ? "true" : "false")
+            })
 
-            Picker("New workspaces start as:", selection: $defaultLayout) {
+            Picker("New workspaces start as:", selection: writeThrough($defaultLayout) {
+                config?.setValue(section: "layout", key: "default", value: "\"\($0)\"")
+            }) {
                 Text("Tiles").tag("tiles")
                 Text("Accordion").tag("accordion")
-            }
-            .onChange(of: defaultLayout) { _, new in
-                config?.setValue(section: "layout", key: "default", value: "\"\(new)\"")
             }
         }
         .padding(20)
@@ -272,12 +335,18 @@ private struct RulesSettings: View {
                         Spacer()
                         Text(label(rule.action)).foregroundStyle(.secondary)
                         Button(role: .destructive) {
-                            config?.removeRule(app: rule.bundleID, title: rule.titlePattern)
+                            // Delete by the block's own position in the file:
+                            // two rules for one app differing only in action
+                            // are identical to a content match.
+                            if let ordinal = rule.sourceOrdinal {
+                                config?.removeRule(at: ordinal)
+                            }
                             refresh()
                         } label: {
                             Image(systemName: "trash")
                         }
                         .buttonStyle(.borderless)
+                        .accessibilityLabel("Delete rule for \(rule.bundleID)")
                     }
                 }
                 if userRules.isEmpty {
@@ -294,8 +363,10 @@ private struct RulesSettings: View {
                     Text("Ignore").tag("ignore")
                 }
                 .frame(width: 90)
+                .accessibilityLabel("Rule action")
                 Button("Add") {
                     guard !newApp.isEmpty else { return }
+                    // Raw strings: addRule TOML-escapes internally (§4.6).
                     config?.addRule(app: newApp, title: newTitle.isEmpty ? nil : newTitle, action: newAction)
                     newApp = ""; newTitle = ""
                     refresh()

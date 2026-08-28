@@ -39,7 +39,11 @@ final class FocusBorderController {
     /// `frame` is the focused window's frame in global CG coordinates
     /// (top-left origin); nil hides the border.
     func update(frame: CGRect?) {
-        guard enabled, let frame else {
+        // §4.3 pause means paused: a layout settle (minimize, close) while
+        // paused must not resurrect the border — the user paused precisely
+        // to stop overlays (presentations, screen sharing).
+        let paused = AppDelegate.shared?.appState.paused ?? false
+        guard enabled, !paused, let frame else {
             window.orderOut(nil)
             return
         }
