@@ -17,7 +17,7 @@ All of i3. None of the hostility.</p>
 ---
 
 - **Real tiling** — an i3-style tree: automatic layouts, workspaces 1–9 per display, focus by direction.
-- **Discoverable** — press the leader (⌥ Space) and a command strip shows what every key does; direct ⌃⌥ chords for speed. Never binds bare ⌥, so international typing survives.
+- **Discoverable** — press the leader (⌥ Space) and a command strip shows what every key does; direct ⌃⌥ chords for speed. The defaults never bind bare ⌥, so international typing survives.
 - **Never fights you** — dialogs and pickers float automatically; stubborn apps are learned; drag a window and drop zones re-tile it.
 - **Layouts that survive real life** — display profiles restore every window's exact position on redock, relaunch, and reboot.
 - **Trustworthy** — public APIs only, no SIP changes ever, Hardened Runtime, one explained permission. Quitting restores every window to exactly where it was.

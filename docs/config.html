@@ -23,7 +23,7 @@
 <p class="lead"><code>~/.config/zephr/config.toml</code> — written with commented defaults on first run, hot-reloaded the moment you save. Every value is optional; an empty file is a complete configuration.</p>
 
 <ul>
-  <li><strong>Errors are never silent:</strong> a typo shows in the menu bar with its line number ("line 7: expected true or false"), and unknown keys get a <em>did-you-mean</em> suggestion. A broken file never takes window management down — Zephr keeps the last good config.</li>
+  <li><strong>Syntax errors surface immediately:</strong> a typo shows in the menu bar with its line number ("line 7: expected true or false"), and unknown keys get a <em>did-you-mean</em> suggestion. A broken file never takes window management down — Zephr keeps the last good config. An unrecognized <code>leader</code> key name is rejected the same way, naming the keys you can bind.</li>
   <li><strong>The Settings window edits this same file</strong>, changing only the keys you touch. Comments, ordering, and formatting survive — safe to keep in your dotfiles.</li>
 </ul>
 
@@ -103,7 +103,7 @@ on-workspace-changed = []     # shell commands; $ZEPHR_WORKSPACE is set</code></
 <p>One block per rule; <strong>first match wins</strong>, and your rules run before Zephr's shipped list. Add them here, in Settings → Rules (which has an "Add Rule for Focused Window" shortcut), or let Zephr learn them: apps that repeatedly refuse tiling get a float rule written automatically.</p>
 <div class="tablewrap"><table>
 <tr><th>Key</th><th>Meaning</th></tr>
-<tr><td><code>app</code></td><td>Bundle identifier (required). Find it with <code>osascript -e 'id of app "Slack"'</code> or via <code>zephrctl list-windows</code>.</td></tr>
+<tr><td><code>app</code></td><td>Bundle identifier (required). Find it with <code>osascript -e 'id of app "Slack"'</code>. <code>zephrctl list-windows</code> shows each window's display name (e.g. "Slack"), not its bundle id — don't copy that value into a rule.</td></tr>
 <tr><td><code>title</code></td><td>Optional case-insensitive regex on the window title.</td></tr>
 <tr><td><code>action</code></td><td><code>"float"</code> · <code>"tile"</code> (override a heuristic) · <code>"ignore"</code> (Zephr never touches it) · <code>"workspace N"</code> (windows open on workspace N).</td></tr>
 </table></div>
