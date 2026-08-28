@@ -20,6 +20,7 @@ final class DoctorController {
     }
 
     private var window: NSWindow?
+    private let windowDelegate = CallbackWindowDelegate()
 
     /// Stage Manager is incompatible by nature (§6.4): say so plainly.
     static func stageManagerEnabled() -> Bool {
@@ -29,27 +30,42 @@ final class DoctorController {
         ) as? Bool ?? false
     }
 
-    private nonisolated static let rivalProcesses = ["yabai", "AeroSpace", "Amethyst", "Rift", "Rectangle", "Magnet", "Loop"]
+    /// Tiling managers that enforce their own layout: two of these really
+    /// will fight over every window.
+    private nonisolated static let fightingRivals = ["yabai", "AeroSpace", "Amethyst", "Rift"]
+    /// Snapping utilities that only move windows on their own explicit
+    /// shortcuts — they coexist with Zephr and are a heads-up, not a failure.
+    private nonisolated static let snappingUtilities = ["Rectangle", "Magnet", "Loop"]
 
-    /// Callable off the main actor for the launch-time check.
-    nonisolated static func runningRivalNames() -> [String] {
-        runningRivals()
+    /// Blocking (forks one pgrep) — call off the main actor (§6.3).
+    nonisolated static func runningRivals() -> (fighting: [String], snapping: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-lx", (fightingRivals + snappingUtilities).joined(separator: "|")]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        // A failed spawn must never reach `waitUntilExit` on an unlaunched
+        // Process — that raises NSInvalidArgumentException (§6.6).
+        do { try p.run() } catch { return ([], []) }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let names = Set(
+            String(decoding: data, as: UTF8.self)
+                .split(separator: "\n")
+                .compactMap { $0.split(separator: " ", maxSplits: 1).last.map(String.init) }
+        )
+        return (fightingRivals.filter(names.contains), snappingUtilities.filter(names.contains))
     }
 
-    private nonisolated static func runningRivals() -> [String] {
-        var found: [String] = []
-        for name in rivalProcesses {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            p.arguments = ["-xq", name]
-            try? p.run()
-            p.waitUntilExit()
-            if p.terminationStatus == 0 { found.append(name) }
-        }
-        return found
+    /// Scans for rivals off the main actor, then builds the checks. The scan
+    /// forks a process, which §6.3 forbids on the main actor — callers that
+    /// can await (the Doctor window, `zephrctl doctor`) go through here.
+    func runChecksOffActor() async -> [Check] {
+        let rivals = await Task.detached { Self.runningRivals() }.value
+        return runChecks(rivals: rivals)
     }
 
-    func runChecks() -> [Check] {
+    func runChecks(rivals: (fighting: [String], snapping: [String])) -> [Check] {
         var checks: [Check] = []
         guard let delegate = AppDelegate.shared else { return checks }
 
@@ -88,13 +104,20 @@ final class DoctorController {
             } : nil
         ))
 
-        let rivals = Self.runningRivals()
+        var rivalStatus = Check.Status.pass
+        var rivalParts: [String] = []
+        if !rivals.fighting.isEmpty {
+            rivalStatus = .fail
+            rivalParts.append("\(rivals.fighting.joined(separator: ", ")) running — another tiling manager; two will fight over every window. Quit it before tiling with Zephr.")
+        }
+        if !rivals.snapping.isEmpty {
+            if rivalStatus == .pass { rivalStatus = .warn }
+            rivalParts.append("\(rivals.snapping.joined(separator: ", ")) running — a snapping utility that only acts on its own shortcuts. It coexists with Zephr; just mind overlapping hotkeys.")
+        }
         checks.append(Check(
-            status: rivals.isEmpty ? .pass : .fail,
+            status: rivalStatus,
             title: "Other window managers",
-            detail: rivals.isEmpty
-                ? "None running."
-                : "\(rivals.joined(separator: ", ")) running — two managers will fight over every window. Quit them."
+            detail: rivalParts.isEmpty ? "None running." : rivalParts.joined(separator: " ")
         ))
 
         checks.append(Check(
@@ -107,17 +130,27 @@ final class DoctorController {
         ))
 
         let windowCount = delegate.appState.managedWindowCount
+        let displayCount = NSScreen.screens.count
         checks.append(Check(
             status: .pass,
             title: "Engine",
-            detail: "\(windowCount) windows managed across \(NSScreen.screens.count) display(s)."
+            detail: "\(windowCount) \(windowCount == 1 ? "window" : "windows") managed across \(displayCount) \(displayCount == 1 ? "display" : "displays")."
         ))
 
         return checks
     }
 
     func present() {
-        let checks = runChecks()
+        // §6.3 anti-stall: the rival scan forks pgrep — run it off the main
+        // actor, then present with the results.
+        _ = Task { [weak self] in
+            let rivals = await Task.detached { Self.runningRivals() }.value
+            self?.presentNow(rivals: rivals)
+        }
+    }
+
+    private func presentNow(rivals: (fighting: [String], snapping: [String])) {
+        let checks = runChecks(rivals: rivals)
         if window == nil {
             let w = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
@@ -127,6 +160,8 @@ final class DoctorController {
             )
             w.title = "Zephr Doctor"
             w.isReleasedWhenClosed = false
+            windowDelegate.onClose = { [weak self] in self?.window = nil }
+            w.delegate = windowDelegate
             window = w
         }
         window?.contentView = NSHostingView(rootView: DoctorView(checks: checks, controller: self))

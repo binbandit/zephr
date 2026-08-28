@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import ServiceManagement
 import SwiftUI
 import ZephrCore
 
@@ -55,6 +56,7 @@ final class OnboardingController {
     var onFinished: (() -> Void)?
 
     private var window: NSWindow?
+    private let windowDelegate = CallbackWindowDelegate()
     private var permissionPoll: Task<Void, Never>?
     private var practiceWindows: [NSWindow] = []
 
@@ -99,6 +101,13 @@ final class OnboardingController {
 
     func present(startAt page: Page = .welcome) {
         model.page = page
+        if page == .tutorial {
+            // Replay means a fresh checklist (§4.1) — not seven pre-checked
+            // rows and a "Finish" button.
+            model.steps = Dictionary(
+                uniqueKeysWithValues: TutorialStep.allCases.map { ($0, false) }
+            )
+        }
         model.permissionGranted = AXIsProcessTrusted()
         model.raycastDetected = !NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.raycast.macos").isEmpty
@@ -115,6 +124,10 @@ final class OnboardingController {
             w.titleVisibility = .hidden
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: OnboardingView(model: model, controller: self))
+            // The red close button must clean up like "Finish" does: close
+            // practice windows, stop the poll, mark onboarded (§4.1).
+            windowDelegate.onClose = { [weak self] in self?.finish() }
+            w.delegate = windowDelegate
             w.center()
             window = w
         }
@@ -281,8 +294,10 @@ private struct OnboardingView: View {
             }
             if !model.permissionGranted {
                 Button("Checked the box already? Reset the stale grant…") {
-                    PermissionGate.resetStaleGrant()
-                    controller.requestPermission()
+                    _ = Task {
+                        await PermissionGate.resetStaleGrant()
+                        controller.requestPermission()
+                    }
                 }
                 .buttonStyle(.link)
                 .font(.caption)
@@ -310,6 +325,7 @@ private struct OnboardingView: View {
             }
             .pickerStyle(.radioGroup)
             .labelsHidden()
+            .accessibilityLabel("Leader key")
             Text("Change it anytime in ~/.config/zephr/config.toml — Zephr reloads on save.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
@@ -364,10 +380,17 @@ private struct OnboardingView: View {
                     }
                 }
             }
-            Toggle("Start Zephr at login", isOn: Bindable(model).launchAtLogin)
-                .onChange(of: model.launchAtLogin) { _, _ in
-                    AppDelegate.shared?.toggleLaunchAtLogin()
+            // The setter acts on the incoming value — an `onChange` toggle
+            // inverts on programmatic seeding and turns the login item OFF
+            // while rendering ON.
+            Toggle("Start Zephr at login", isOn: Binding(
+                get: { model.launchAtLogin },
+                set: { on in
+                    model.launchAtLogin = on
+                    AppDelegate.shared?.setLaunchAtLogin(on)
                 }
+            ))
+            .onAppear { model.launchAtLogin = SMAppService.mainApp.status == .enabled }
             Spacer()
             Button("Start tiling") { controller.advance() }
                 .controlSize(.large)

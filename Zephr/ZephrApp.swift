@@ -67,11 +67,15 @@ private struct MenuContent: View {
             Button {
                 AppDelegate.shared?.engine.perform(.goToWorkspace(n))
             } label: {
-                let name = appState.workspaceNames[n].map { " · \($0)" } ?? ""
+                let name = appState.workspaceNames[n].flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
                 let check = n == appState.currentWorkspace ? "✓ " : ""
                 Text("\(check)Workspace \(n)\(name)")
             }
-            .keyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: [.control, .option])
+            // §4.2: the shortcut hint tracks the active key preset — under
+            // vim (leader-only) there is no chord to advertise.
+            .keyboardShortcut(ChordHints.menuModifiers.map {
+                KeyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: $0)
+            })
         }
 
         Divider()
@@ -109,7 +113,7 @@ private struct MenuContent: View {
 
         Divider()
 
-        Text("\(appState.managedWindowCount) windows managed")
+        Text("\(appState.managedWindowCount) \(appState.managedWindowCount == 1 ? "window" : "windows") managed")
 
         Divider()
 
@@ -161,8 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.engine.gapDrag(window: id, direction: direction, deltaPixels: delta)
         }
         gapResizer.onDragEnded = { [weak self] in
-            guard let engine = self?.engine else { return }
-            engine.gapResizer?.update(boundaries: engine.gapBoundaries())
+            // Next-turn hop: this fires from a strip view's own mouseUp —
+            // rebuilding immediately would deallocate the window whose view
+            // is still mid-dispatch.
+            _ = Task { @MainActor in
+                guard let engine = self?.engine else { return }
+                engine.gapResizer?.update(boundaries: engine.gapBoundaries())
+            }
         }
         engine.gapResizer = gapResizer
         hotkeys = HotkeyService()
@@ -204,14 +213,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appState.showMenuBarIcon = parsed.showMenuBarIcon
         }
         // §6.4: a frame-veto teaches us an app must float — persist the rule.
-        engine.onRuleLearned = { [weak self] bundleID, title in
+        engine.onRuleLearned = { [weak self] bundleID in
             guard let config = self?.configService else { return }
-            let escaped = NSRegularExpression.escapedPattern(for: title)
             let already = config.current.userRules.contains {
                 $0.bundleID == bundleID && $0.action == .float
             }
             if !already {
-                config.addRule(app: bundleID, title: title.isEmpty ? nil : "^\(escaped)$", action: "float")
+                config.addRule(app: bundleID, title: nil, action: "float")
             }
         }
         configService.onError = { [weak self] message in
@@ -222,11 +230,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.launchAtLogin = SMAppService.mainApp.status == .enabled
 
         // §6.6: restore windows before dying on an uncaught ObjC exception.
+        // Synchronously — the default handler terminates the process before
+        // the run loop could ever drain an async'd block ("never lose a
+        // window"). Off the main thread, hop over with a bounded wait so a
+        // wedged main thread can't hang the crash path either (§6.3).
         NSSetUncaughtExceptionHandler { _ in
-            DispatchQueue.main.async {
-                AppDelegate.shared?.engine.shutdownRestore()
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    AppDelegate.shared?.engine?.shutdownRestore()
+                }
+            } else {
+                let done = DispatchSemaphore(value: 0)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        AppDelegate.shared?.engine?.shutdownRestore()
+                    }
+                    done.signal()
+                }
+                _ = done.wait(timeout: .now() + .seconds(2))
             }
         }
+
+        // A write to a closed socket must never kill us: the default SIGPIPE
+        // disposition terminates the process outright, skipping
+        // `applicationWillTerminate` and leaving every stashed window parked
+        // off-screen (invariant 1). `IPCServer.start()` sets this too, but it
+        // only runs after the Accessibility grant — this covers the pre-grant
+        // window and any other pipe we ever write to.
+        signal(SIGPIPE, SIG_IGN)
 
         // Restore every window on SIGTERM too, not just clean quits (§6.6).
         signal(SIGTERM, SIG_IGN)
@@ -281,20 +312,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         permissionGate.dismissWindow()
         engine.start()
         hotkeys.start()
-        let server = IPCServer(engine: engine)
-        server.start()
-        ipc = server
-        engine.onEvent = { [weak server] event, payload in
-            server?.broadcast(event, payload)
+        // Idempotent: a re-grant after AX revocation re-enters here — never
+        // stack a second server on the same socket (leaked fd, live sources).
+        if ipc == nil {
+            let server = IPCServer(engine: engine)
+            server.start()
+            ipc = server
+            engine.onEvent = { [weak server] event, payload in
+                server?.broadcast(event, payload)
+            }
         }
         engine.onPauseChange = { [weak self] paused in
             self?.hotkeys.suspended = paused
         }
+        // §6.6: the audit pauses on AX revocation — a re-grant must resume,
+        // or every command bails out with no menu-free way back.
+        engine.setPaused(false)
         // Two managers fighting over every window is the worst first-run
-        // experience possible — check for rivals up front, not just in Doctor.
+        // experience possible — check for rivals up front, not just in
+        // Doctor. Snapping utilities (Rectangle & co.) only act on their own
+        // shortcuts: they coexist, so they never warrant a Doctor window in
+        // the user's face at launch.
         Task.detached {
-            let rivals = DoctorController.runningRivalNames()
-            if !rivals.isEmpty {
+            let rivals = DoctorController.runningRivals()
+            if !rivals.fighting.isEmpty {
                 await MainActor.run { AppDelegate.shared?.doctor.present() }
             }
         }
@@ -316,8 +357,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for old in others {
             old.terminate() // SIGTERM path → old instance restores its windows
         }
+        // Give the old instance room to finish `shutdownRestore` before
+        // force-killing it: that pass writes two AX calls per window, and a
+        // force-kill mid-restore strands the remainder at stash coordinates
+        // with no manager left to rescue them (invariant 1). Poll instead of
+        // sleeping a fixed interval, so the common case stays fast and a slow
+        // app-heavy restore still gets up to 15s.
         Task {
-            try? await Task.sleep(for: .seconds(3))
+            let deadline = ContinuousClock.now + .seconds(15)
+            while ContinuousClock.now < deadline,
+                  others.contains(where: { !$0.isTerminated }) {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
             for old in others where !old.isTerminated {
                 old.forceTerminate()
             }
@@ -325,11 +376,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func toggleLaunchAtLogin() {
+        setLaunchAtLogin(SMAppService.mainApp.status != .enabled)
+    }
+
+    /// Idempotent, absolute setter — UI toggles pass the value they show, so
+    /// a control can never invert the state it renders.
+    func setLaunchAtLogin(_ enabled: Bool) {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
+            if enabled {
+                if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
             } else {
-                try SMAppService.mainApp.register()
+                if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
             }
         } catch {
             NSLog("launch-at-login toggle failed: \(error.localizedDescription)")
