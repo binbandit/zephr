@@ -135,40 +135,11 @@ final class HotkeyService {
         }
     }
 
-    private static let keyCodesByName: [String: Int64] = [
-        "space": Key.space, "tab": Key.tab, "grave": Key.grave, "`": Key.grave,
-        "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4,
-        "i": 34, "j": 38, "k": 40, "l": 37, "m": 46, "n": 45, "o": 31,
-        "p": 35, "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9,
-        "w": 13, "x": 7, "y": 16, "z": 6,
-        // ANSI digit row (kVK_ANSI_0–9) — documented as valid leader keys.
-        "0": 29, "1": 18, "2": 19, "3": 20, "4": 21,
-        "5": 23, "6": 22, "7": 26, "8": 28, "9": 25,
-    ]
-
-    /// Every key name `setLeader` accepts. `LeaderBinding.knownKeyNames` in
-    /// ZephrCore is the canonical list — it is what rejects a typo'd `leader =`
-    /// at parse time (§4.6: errors are never silent) — and this table must be
-    /// able to map every name Core accepts. Core is a pure package and cannot
-    /// reach this MainActor-isolated table, so `assertTablesAgree()` guards the
-    /// two against drift instead.
-    static var validKeyNames: [String] { keyCodesByName.keys.sorted() }
-
-    /// Fails fast in debug builds if the key tables diverge: a name Core
-    /// accepts but this table can't map would parse cleanly and then silently
-    /// leave the old leader bound — the exact failure §4.6 forbids.
-    private static func assertTablesAgree() {
-        assert(
-            Set(keyCodesByName.keys) == LeaderBinding.knownKeyNames,
-            "leader key tables drifted — Core accepts \(LeaderBinding.knownKeyNames.symmetricDifference(Set(keyCodesByName.keys))) that HotkeyService cannot map"
-        )
-    }
-
     /// Applies a leader binding from config. Returns false (keeping the
     /// current leader) when the key name is unknown.
     @discardableResult
     func setLeader(_ binding: LeaderBinding) -> Bool {
-        guard let code = Self.keyCodesByName[binding.key] else {
+        guard let code = LeaderBinding.keyCodesByName[binding.key] else {
             Self.log.warning("unknown leader key \"\(binding.key)\" — keeping current leader")
             return false
         }
@@ -189,10 +160,8 @@ final class HotkeyService {
     }
 
     private var tapRetry: Task<Void, Never>?
-    private var tapSource: CFRunLoopSource?
 
     func start() {
-        Self.assertTablesAgree()
         guard tap == nil else { return }
         if createTap() {
             tapRetry?.cancel()
@@ -236,7 +205,6 @@ final class HotkeyService {
         ) else { return false }
         self.tap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        tapSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
@@ -346,28 +314,6 @@ final class HotkeyService {
     fileprivate func carbonHotkeyFired(id: UInt32) {
         guard carbonActions.indices.contains(Int(id)) else { return }
         carbonActions[Int(id)]()
-    }
-
-    func stop() {
-        tapRetry?.cancel()
-        tapRetry = nil
-        if let tapSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes)
-            self.tapSource = nil
-        }
-        if let tap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
-            self.tap = nil
-        }
-        secureInputPoll?.cancel()
-        secureInputPoll = nil
-        unregisterCarbonFallback()
-        // Reset so a later start()'s poll re-detects Secure Input and
-        // re-registers the fallback instead of seeing "no change".
-        secureInputActive = false
-        swallowedKeyUps.removeAll()
-        closeLayer()
     }
 
     func reenableTap() {

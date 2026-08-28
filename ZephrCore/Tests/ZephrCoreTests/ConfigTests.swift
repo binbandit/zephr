@@ -290,3 +290,36 @@ struct ConfigTests {
         #expect(parsed.userRules[0].titlePattern == #"Save "draft" #1"#)
     }
 }
+
+@Suite("Leader key table")
+struct LeaderKeyTableTests {
+
+    /// These are the ANSI virtual key codes the event tap compares against.
+    /// A wrong number here binds the leader to the wrong physical key, which
+    /// no other test would catch.
+    @Test func knownCodesAreCorrect() {
+        let codes = LeaderBinding.keyCodesByName
+        #expect(codes["space"] == 49)
+        #expect(codes["tab"] == 48)
+        #expect(codes["grave"] == 50)
+        #expect(codes["`"] == codes["grave"])
+        #expect(codes["a"] == 0)
+        #expect(codes["h"] == 4)
+        #expect(codes["j"] == 38)
+        #expect(codes["k"] == 40)
+        #expect(codes["l"] == 37)
+        #expect(codes["z"] == 6)
+        #expect(codes["0"] == 29)
+        #expect(codes["1"] == 18)
+        #expect(codes["9"] == 25)
+    }
+
+    /// Every accepted name must map, or a config the parser blesses leaves
+    /// the old leader silently bound (§4.6).
+    @Test func everyAcceptedNameMaps() {
+        for name in LeaderBinding.knownKeyNames {
+            #expect(LeaderBinding.keyCodesByName[name] != nil, "\(name) has no key code")
+        }
+        #expect(LeaderBinding.knownKeyNames.count == 26 + 10 + 4)
+    }
+}
