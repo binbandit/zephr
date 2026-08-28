@@ -21,6 +21,12 @@ public final class Workspace {
     public var floatByDefault: Bool = false
     /// Display this workspace belongs to.
     public internal(set) var homeDisplay: DisplayID?
+    /// The display the user last deliberately put this workspace on.
+    /// `homeDisplay` follows an undock (workspaces must never be stranded on
+    /// a display that is gone); this remembers where they belong, so a
+    /// redock puts them back instead of leaving the returning monitor on a
+    /// fresh empty workspace.
+    public internal(set) var preferredDisplay: DisplayID?
 
     /// Frames from the most recent solve, used for split-orientation
     /// heuristics and float-toggle placement.
@@ -304,7 +310,12 @@ public final class Workspace {
                 if parent.children.indices.contains(nIdx) {
                     let child = parent.children[idx]
                     let neighbor = parent.children[nIdx]
-                    let applied = min(max(delta, -(child.ratio - minRatio)), neighbor.ratio - minRatio)
+                    // The clamp range must always contain zero: when a ratio
+                    // already sits below minRatio the naive bounds exclude it
+                    // and a grow request would shrink the window instead.
+                    let lo = min(0, -(child.ratio - minRatio))
+                    let hi = max(0, neighbor.ratio - minRatio)
+                    let applied = min(max(delta, lo), hi)
                     guard abs(applied) > 0.0001 else { return false }
                     child.ratio += applied
                     neighbor.ratio -= applied
@@ -323,7 +334,11 @@ public final class Workspace {
         guard let leaf = index[id], let parent = leaf.parent, parent.children.count > 1 else { return false }
         let siblings = parent.children.filter { $0 !== leaf }
         let maxShare = 1 - minRatio * CGFloat(siblings.count)
-        let applied = min(max(delta, minRatio - leaf.ratio), maxShare - leaf.ratio)
+        // As in resize: the clamp range must contain zero, or a share already
+        // outside [minRatio, maxShare] inverts the requested direction.
+        let lo = min(0, minRatio - leaf.ratio)
+        let hi = max(0, maxShare - leaf.ratio)
+        let applied = min(max(delta, lo), hi)
         guard abs(applied) > 0.0001 else { return false }
         let donorSum = siblings.reduce(CGFloat(0)) { $0 + $1.ratio }
         guard donorSum > 0 else { return false }
@@ -385,10 +400,13 @@ public final class Workspace {
         for c in parent.children { c.ratio = share }
     }
 
-    /// Toggles tiles ↔ accordion on the focused window's container.
+    /// Toggles tiles ↔ accordion on the focused window's container, then
+    /// normalizes: the toggle can make a nested container's layout match a
+    /// same-orientation parent, which the merge pass splices away (§4.3).
     public func cycleLayout(_ id: WindowID) {
         guard let leaf = index[id], let parent = leaf.parent else { return }
         parent.layout = parent.layout.cycled
+        normalize()
     }
 
     // MARK: - Normalization
@@ -408,6 +426,11 @@ public final class Workspace {
         }
         root.renormalizeRatios()
         root.ratio = 1
+        // Splices and hoists reindex siblings, stranding every
+        // `lastFocusedIndex` above the focused window — which is what
+        // accordions expand and directional focus descends through. Repair
+        // the path here so no caller has to remember to.
+        if let focused = focusedWindow, contains(focused) { focus(focused) }
     }
 
     private func normalizeSubtree(_ node: TreeNode) {

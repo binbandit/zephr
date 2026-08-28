@@ -18,6 +18,21 @@ public struct LeaderBinding: Sendable, Equatable {
         self.shift = shift
         self.key = key
     }
+
+    /// Every key name the config accepts for the leader chord. The app's
+    /// HotkeyService key table must map each of these — anything else gets
+    /// an inline warning and the default leader, so an unbindable leader is
+    /// never a silent no-op and never rejects the rest of the file (§4.6).
+    public static let knownKeyNames: Set<String> = {
+        var names: Set<String> = ["space", "tab", "grave", "`"]
+        for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+            names.insert(String(UnicodeScalar(scalar)!))
+        }
+        for digit in 0...9 {
+            names.insert(String(digit))
+        }
+        return names
+    }()
 }
 
 /// Result of parsing a config file. Every field has the shipped default, so
@@ -87,7 +102,7 @@ public enum ConfigFile {
     # Per-app rules — first match wins; checked before Zephr's built-in list.
     # [[rules]]
     # app = "com.example.app"     # bundle identifier
-    # title = "^Preferences"      # optional regex on the window title
+    # title = "^Preferences"      # title regex — case-insensitive, matches anywhere; anchor with ^/$
     # action = "float"            # float | tile | ignore | workspace N
 
     [callbacks]
@@ -110,7 +125,14 @@ public enum ConfigFile {
             var headerLine: Int
         }
 
-        let lines = text.components(separatedBy: .newlines)
+        // CRLF files: normalize up front so reported line numbers match
+        // what the user's editor shows (§4.6) and no stray \r survives
+        // into values or writeback comparisons.
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: .newlines)
+        // Duplicate `key =` lines in one table silently last-win otherwise;
+        // TOML calls redefinition an error, we warn naming both lines (§4.6).
+        var firstLineForKey: [String: Int] = [:]
         for (index, rawLine) in lines.enumerated() {
             let lineNumber = index + 1
             let line = stripComment(rawLine).trimmingCharacters(in: .whitespaces)
@@ -153,11 +175,41 @@ public enum ConfigFile {
                 throw ConfigError(line: lineNumber, message: "missing value for `\(key)`")
             }
 
+            let sectionID: String?
+            switch section {
+            case .root: sectionID = ""
+            case .layout: sectionID = "layout"
+            case .keys: sectionID = "keys"
+            case .callbacks: sectionID = "callbacks"
+            case .workspaces: sectionID = "workspaces"
+            case .rule(let idx): sectionID = "rules#\(idx)"
+            case .unknown: sectionID = nil
+            }
+            if let sectionID {
+                let dupKey = "\(sectionID)\u{1}\(key)"
+                if let first = firstLineForKey[dupKey] {
+                    config.warnings.append("line \(lineNumber): `\(key)` was already set on line \(first) — the last value wins")
+                } else {
+                    firstLineForKey[dupKey] = lineNumber
+                }
+            }
+
             switch section {
             case .root:
                 switch key {
                 case "leader":
-                    config.leader = try parseLeader(try string(rawValue, line: lineNumber), line: lineNumber)
+                    let binding = try parseLeader(try string(rawValue, line: lineNumber), line: lineNumber)
+                    // Only keys HotkeyService can bind are accepted — anything
+                    // else would parse fine and then silently never open the
+                    // layer. Warn and fall back to the default leader; one bad
+                    // key must not revert the whole file (§4.6: a broken file
+                    // never takes window management down).
+                    if LeaderBinding.knownKeyNames.contains(binding.key) {
+                        config.leader = binding
+                    } else {
+                        config.leader = .default
+                        config.warnings.append("line \(lineNumber): \"\(binding.key)\" is not a bindable leader key — use a–z, 0–9, space, tab, or grave; using the default leader \"alt-space\"")
+                    }
                 case "dock-icon":
                     config.showDockIcon = try bool(rawValue, line: lineNumber)
                 case "menu-bar-icon":
@@ -243,12 +295,23 @@ public enum ConfigFile {
             config.warnings.append("menu-bar-icon and dock-icon are both off — reach Zephr via hotkeys, zephrctl, or by editing this file")
         }
 
-        for rule in rules {
+        for (ordinal, rule) in rules.enumerated() {
             guard let app = rule.app, !app.isEmpty else {
                 throw ConfigError(line: rule.headerLine, message: "[[rules]] needs an `app` (bundle identifier)")
             }
             guard let actionName = rule.action else {
                 throw ConfigError(line: rule.headerLine, message: "[[rules]] for \(app) needs an `action`")
+            }
+            if let pattern = rule.title {
+                do {
+                    try WindowRule.validateTitlePattern(pattern)
+                } catch {
+                    // A rule that can never fire is worse than silence (§4.6),
+                    // but one dead rule must not reject the whole file either.
+                    // Warn with the line number and drop just this rule.
+                    config.warnings.append("line \(rule.headerLine): title regex \"\(pattern)\" for \(app) does not compile: \((error as NSError).localizedDescription) — rule skipped")
+                    continue
+                }
             }
             let action: WindowRule.Action
             switch actionName {
@@ -264,7 +327,7 @@ public enum ConfigFile {
                     throw ConfigError(line: rule.headerLine, message: "action must be \"float\", \"tile\", \"ignore\", or \"workspace N\", got \"\(actionName)\"")
                 }
             }
-            config.userRules.append(WindowRule(bundleID: app, titlePattern: rule.title, action: action))
+            config.userRules.append(WindowRule(bundleID: app, titlePattern: rule.title, action: action, sourceOrdinal: ordinal))
         }
 
         return config
@@ -310,10 +373,17 @@ public enum ConfigFile {
 
     private static func stripComment(_ line: String) -> String {
         var inString = false
-        for (i, char) in line.enumerated() {
-            if char == "\"" { inString.toggle() }
-            if char == "#" && !inString {
-                return String(line.prefix(i))
+        var skipNext = false
+        for index in line.indices {
+            guard !skipNext else { skipNext = false; continue }
+            let char = line[index]
+            if inString {
+                if char == "\\" { skipNext = true } // \" does not close the string
+                else if char == "\"" { inString = false }
+            } else if char == "\"" {
+                inString = true
+            } else if char == "#" {
+                return String(line[..<index])
             }
         }
         return line
@@ -323,7 +393,46 @@ public enum ConfigFile {
         guard raw.count >= 2, raw.hasPrefix("\""), raw.hasSuffix("\"") else {
             throw ConfigError(line: line, message: "expected a quoted string, got \(raw)")
         }
-        return String(raw.dropFirst().dropLast())
+        return decodeEscapes(String(raw.dropFirst().dropLast()))
+    }
+
+    /// TOML basic-string escapes. Unknown sequences (`\d`, `\s`, …) pass
+    /// through untouched — title regexes lean on them and the interim
+    /// parser stays lenient; P4's TOML engine tightens this.
+    private static func decodeEscapes(_ s: String) -> String {
+        guard s.contains("\\") else { return s }
+        var out = String()
+        out.reserveCapacity(s.count)
+        var i = s.startIndex
+        while i < s.endIndex {
+            let char = s[i]
+            i = s.index(after: i)
+            guard char == "\\", i < s.endIndex else {
+                out.append(char)
+                continue
+            }
+            switch s[i] {
+            case "\"": out.append("\""); i = s.index(after: i)
+            case "\\": out.append("\\"); i = s.index(after: i)
+            case "n": out.append("\n"); i = s.index(after: i)
+            case "t": out.append("\t"); i = s.index(after: i)
+            case "r": out.append("\r"); i = s.index(after: i)
+            case "u", "U":
+                let digits = s[i] == "u" ? 4 : 8
+                let start = s.index(after: i)
+                if let end = s.index(start, offsetBy: digits, limitedBy: s.endIndex),
+                   let code = UInt32(s[start..<end], radix: 16),
+                   let scalar = UnicodeScalar(code) {
+                    out.append(Character(scalar))
+                    i = end
+                } else {
+                    out.append("\\") // malformed \uXXXX: keep it literally
+                }
+            default:
+                out.append("\\") // unknown escape: keep it literally
+            }
+        }
+        return out
     }
 
     private static func bool(_ raw: String, line: Int) throws -> Bool {
@@ -335,11 +444,16 @@ public enum ConfigFile {
     }
 
     private static func number(_ raw: String, line: Int, range: ClosedRange<Double>) throws -> CGFloat {
-        guard let value = Double(raw) else {
+        // `Double(raw)` happily parses "nan"/"inf"; formatting those (or
+        // anything huge) through Int(value) traps. Reject non-finite up
+        // front and format errors from the raw token — a config typo must
+        // never be able to crash the app (invariant 1: a trap here strands
+        // every stashed window off-screen).
+        guard let value = Double(raw), value.isFinite else {
             throw ConfigError(line: line, message: "expected a number, got \(raw)")
         }
         guard range.contains(value) else {
-            throw ConfigError(line: line, message: "\(Int(value)) is outside \(Int(range.lowerBound))–\(Int(range.upperBound))")
+            throw ConfigError(line: line, message: "\(raw) is outside \(Int(range.lowerBound))–\(Int(range.upperBound))")
         }
         return CGFloat(value)
     }
@@ -350,7 +464,7 @@ public enum ConfigFile {
         }
         let inner = raw.dropFirst().dropLast().trimmingCharacters(in: .whitespaces)
         guard !inner.isEmpty else { return [] }
-        return try inner.components(separatedBy: ",").map {
+        return try splitArrayBody(inner).map {
             let token = $0.trimmingCharacters(in: .whitespaces)
             guard let n = Int(token), range.contains(n) else {
                 throw ConfigError(line: line, message: "expected numbers \(range.lowerBound)–\(range.upperBound), got \(token)")
@@ -365,9 +479,42 @@ public enum ConfigFile {
         }
         let inner = raw.dropFirst().dropLast().trimmingCharacters(in: .whitespaces)
         guard !inner.isEmpty else { return [] }
-        return try inner.components(separatedBy: ",").map {
+        return try splitArrayBody(inner).map {
             try string($0.trimmingCharacters(in: .whitespaces), line: line)
         }
+    }
+
+    /// Splits an array body on commas that sit outside quoted strings, so
+    /// a comma inside a command (`"sketchybar --set a b=1,2"`) survives.
+    /// A trailing comma is tolerated.
+    private static func splitArrayBody(_ inner: String) -> [String] {
+        var elements: [String] = []
+        var current = ""
+        var inString = false
+        var skipNext = false
+        for char in inner {
+            if skipNext {
+                current.append(char)
+                skipNext = false
+            } else if inString {
+                current.append(char)
+                if char == "\\" { skipNext = true }
+                else if char == "\"" { inString = false }
+            } else if char == "\"" {
+                inString = true
+                current.append(char)
+            } else if char == "," {
+                elements.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        elements.append(current)
+        if let last = elements.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            elements.removeLast()
+        }
+        return elements
     }
 
     private static func parseLeader(_ raw: String, line: Int) throws -> LeaderBinding {
@@ -392,6 +539,9 @@ public enum ConfigFile {
         guard !binding.key.isEmpty else {
             throw ConfigError(line: line, message: "leader is missing its key")
         }
+        // Whether the key is one HotkeyService can bind is checked at the
+        // call site: an unbindable key is a warning plus the default leader,
+        // not a parse failure (§4.6).
         return binding
     }
 }

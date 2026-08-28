@@ -38,25 +38,34 @@ public final class WorkspaceModel {
 
     public func activeWorkspace(on display: DisplayID) -> Workspace {
         if let id = activeWorkspaceByDisplay[display] { return workspace(id) }
-        // Assign the lowest workspace homed here, else the lowest unused number.
+        // Assign the lowest workspace homed here that isn't already visible
+        // on another display (two displays can't show the same workspace),
+        // else the lowest unused number.
+        let activeElsewhere = Set(activeWorkspaceByDisplay.values)
         let homed = workspaces.values
-            .filter { $0.homeDisplay == display }
+            .filter { $0.homeDisplay == display && !activeElsewhere.contains($0.id) }
             .map(\.id)
             .sorted()
         let id = homed.first ?? nextFreeWorkspaceID()
         let ws = workspace(id)
         ws.homeDisplay = display
+        ws.preferredDisplay = display
         activeWorkspaceByDisplay[display] = id
         return ws
     }
 
+    /// A workspace id this display can take. Ids are the keys 1-9 and
+    /// nothing else: inventing a tenth produces a workspace no binding can
+    /// reach and that profile restore silently drops, so once all nine
+    /// exist we reuse one rather than counting past the keyboard.
     private func nextFreeWorkspaceID() -> Int {
-        var id = 1
         let active = Set(activeWorkspaceByDisplay.values)
-        while workspaces[id] != nil && (active.contains(id) || workspaces[id]?.homeDisplay != nil) {
-            id += 1
-        }
-        return id
+        let free = (1...9).filter { !active.contains($0) }
+        // Never created yet, then created-but-empty, then anything free.
+        return free.first { workspaces[$0] == nil }
+            ?? free.first { workspaces[$0]?.isEmpty == true }
+            ?? free.first
+            ?? 1
     }
 
     public var focusedWorkspace: Workspace? {
@@ -77,14 +86,28 @@ public final class WorkspaceModel {
     @discardableResult
     public func syncDisplays(_ connected: [DisplayID]) -> Set<DisplayID> {
         var affected = Set<DisplayID>()
-        let old = displays
         displays = connected
+        // A zero-display interval (lid closed, displays asleep) keeps the
+        // active-workspace map intact so reopening the same arrangement
+        // restores it; stale entries are cleaned on the next non-empty sync.
         guard !connected.isEmpty else { return [] }
 
-        // Migrate homeless workspaces.
+        // Migrate homeless workspaces, and bring back any that a previous
+        // undock displaced — `preferredDisplay` is where the user actually
+        // put them, `homeDisplay` is only where they are surviving.
         let connectedSet = Set(connected)
         for ws in workspaces.values {
-            if let home = ws.homeDisplay, !connectedSet.contains(home) {
+            if let preferred = ws.preferredDisplay, connectedSet.contains(preferred),
+               ws.homeDisplay != preferred {
+                ws.homeDisplay = preferred
+                affected.insert(preferred)
+                if let stale = activeWorkspaceByDisplay.first(where: { $0.value == ws.id })?.key,
+                   stale != preferred {
+                    activeWorkspaceByDisplay.removeValue(forKey: stale)
+                    affected.insert(stale)
+                }
+                activeWorkspaceByDisplay[preferred] = ws.id
+            } else if let home = ws.homeDisplay, !connectedSet.contains(home) {
                 ws.homeDisplay = connected[0]
                 affected.insert(connected[0])
             } else if ws.homeDisplay == nil {
@@ -92,8 +115,11 @@ public final class WorkspaceModel {
             }
         }
 
-        // Drop active entries for vanished displays.
-        for d in old where !connectedSet.contains(d) {
+        // Drop active entries for vanished displays — checked against the
+        // *current* keys, not the previous display list, so entries left
+        // behind by a zero-display interval are cleaned too. Missing this
+        // let two connected displays end up showing the same workspace.
+        for d in Array(activeWorkspaceByDisplay.keys) where !connectedSet.contains(d) {
             activeWorkspaceByDisplay.removeValue(forKey: d)
         }
 
@@ -103,13 +129,14 @@ public final class WorkspaceModel {
             affected.insert(d)
         }
 
-        // Two displays can't show the same workspace: keep the first.
+        // Two displays can't show the same workspace: keep the first. The
+        // replacement's id joins `seen` so later displays can't re-pick it.
         var seen = Set<Int>()
         for d in connected {
             if let id = activeWorkspaceByDisplay[d] {
                 if seen.contains(id) {
                     activeWorkspaceByDisplay.removeValue(forKey: d)
-                    _ = activeWorkspace(on: d)
+                    seen.insert(activeWorkspace(on: d).id)
                     affected.insert(d)
                 } else {
                     seen.insert(id)
@@ -177,9 +204,12 @@ public final class WorkspaceModel {
         return true
     }
 
-    /// The workspace shown before the last switch — re-requesting the
-    /// visible workspace bounces back to it (i3 back-and-forth).
-    public private(set) var previousWorkspaceID: Int?
+    /// Per display, the workspace it showed before its last switch —
+    /// re-requesting the visible workspace bounces back to it (i3
+    /// back-and-forth). Keyed by display because a single global value made
+    /// a re-press on one monitor jump to the other monitor's history,
+    /// switching the wrong screen and dragging focus across with it.
+    public private(set) var previousWorkspaceByDisplay: [DisplayID: Int] = [:]
 
     /// Switches the focused (or given) display to workspace `n`. If the
     /// workspace lives on another connected display, focus jumps there
@@ -202,23 +232,28 @@ public final class WorkspaceModel {
         if previous == n {
             // Back-and-forth: only when this is a true re-press of the
             // workspace the user is looking at.
-            if focusedDisplay == target, let back = previousWorkspaceID, back != n {
-                return activateWorkspace(back, on: display)
+            if focusedDisplay == target,
+               let back = previousWorkspaceByDisplay[target], back != n {
+                return activateWorkspace(back, on: target)
             }
             focusedDisplay = target
             return []
         }
 
         focusedDisplay = target
-        previousWorkspaceID = previous
+        previousWorkspaceByDisplay[target] = previous
         activeWorkspaceByDisplay[target] = n
+        ws.preferredDisplay = target
         return [target]
     }
 
     /// Moves every window in the model into the given workspace — the
     /// `leader w` rescue command backing the "never lose a window" invariant.
+    /// Windows move in ascending id order: Dictionary key order varies with
+    /// the per-process hash seed, and the recovery keystroke must produce
+    /// the same layout every time.
     public func rescueAllWindows(into n: Int) {
-        let all = Array(windowWorkspace.keys)
+        let all = windowWorkspace.keys.sorted { $0.raw < $1.raw }
         for id in all {
             _ = moveWindow(id, toWorkspace: n)
         }
