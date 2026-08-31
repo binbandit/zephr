@@ -360,7 +360,12 @@ final class IPCServer {
                 // `workspace` is optional (nil = native fullscreen). Interpolating
                 // it directly emits `Optional(1)` / `nil`, neither of which is
                 // JSON — §4.8 promises stable, parseable schemas.
-                #"{"id":\#($0.id.raw),"app":\#(jsonString($0.app)),"title":\#(jsonString($0.title)),"workspace":\#($0.workspace.map(String.init) ?? "null")}"#
+                // `id` is a string and `app` a bundle id, matching the
+                // event stream exactly — they used to disagree on both, so
+                // any `jq` join between a subscription and this query
+                // silently matched nothing. `app-name` carries the
+                // localized display name the palette shows.
+                #"{"id":\#(jsonString("\($0.id.raw)")),"app":\#(jsonString($0.bundleID)),"app-name":\#(jsonString($0.app)),"title":\#(jsonString($0.title)),"workspace":\#($0.workspace.map(String.init) ?? "null")}"#
             }
             return "[\(items.joined(separator: ","))]"
         case "list-workspaces":

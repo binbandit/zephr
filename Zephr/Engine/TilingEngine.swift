@@ -73,6 +73,18 @@ final class TilingEngine {
     private(set) var connections: [pid_t: AppAXConnection] = [:]
     /// Apps *we* hid for the stash — never touch apps the user hid (⌘H).
     private var hiddenApps: Set<pid_t> = []
+    /// The frame each window had before Zephr ever touched it, keyed by the
+    /// AX element so it survives re-adoption.
+    ///
+    /// Adoption is not a once-per-window event: a spurious destroy
+    /// notification, a pid that momentarily stops resolving, or the audit's
+    /// unknown-window sweep all re-adopt a window that is already laid out —
+    /// and capturing `originalFrame` from *that* snapshot silently replaces
+    /// the user's real geometry with a tile. Quit then "restores" windows to
+    /// where the layout already had them, which looks exactly like restore
+    /// being broken.
+    private var originalFrames: [AXElement: CGRect] = [:]
+
     /// Pids with an in-flight `maybeHideApp` probe.
     private var hideProbesInFlight: Set<pid_t> = []
     private var displays: [DisplayInfo] = []
@@ -163,6 +175,24 @@ final class TilingEngine {
             guard let pid = app?.processIdentifier else { return }
             MainActor.assumeIsolated { TilingEngine.shared?.detachApp(pid: pid) }
         }
+        // Waking, unlocking, or switching back from another user account
+        // leaves the layout unreconciled: none of them necessarily changes
+        // the display arrangement, so `DisplayService` sees nothing, and the
+        // audit's activity gate can leave the first sweep up to ~30 s away.
+        // Apps also move their own windows across a sleep. Reconcile at
+        // once instead of making the user wait or nudge something.
+        let wakeNotifications: [(NotificationCenter, Notification.Name)] = [
+            (workspaceNC, NSWorkspace.didWakeNotification),
+            (workspaceNC, NSWorkspace.screensDidWakeNotification),
+            (workspaceNC, NSWorkspace.sessionDidBecomeActiveNotification),
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsUnlocked")),
+        ]
+        for (center, name) in wakeNotifications {
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { TilingEngine.shared?.resumeFromIdle() }
+            }
+        }
+
         // Switching native Space moves windows out from under us with no AX
         // notification at all (§6.4). Debounced past the transition, which
         // animates for a few hundred ms and reports a half-settled window
@@ -418,6 +448,7 @@ final class TilingEngine {
         for mw in managed {
             windows.removeValue(forKey: mw.id)
             model.removeWindow(mw.id)
+            originalFrames.removeValue(forKey: mw.element)
         }
         if !managed.isEmpty { applyAll() }
     }
@@ -473,10 +504,12 @@ final class TilingEngine {
         // in the palette (marked) and re-tiles when it leaves fullscreen (§6.4).
         if snap.fullscreen {
             lastAdoptionAt = ContinuousClock.now
+            let original = originalFrames[element] ?? snap.frame
+            originalFrames[element] = original
             windows[id] = ManagedWindow(
                 id: id, pid: pid, bundleID: conn.bundleID, element: element,
                 title: snap.title, floating: false, fullscreen: true,
-                lastVisibleFrame: snap.frame, originalFrame: snap.frame
+                lastVisibleFrame: snap.frame, originalFrame: original
             )
             hub.watchWindow(pid: pid, element: element, id: id)
             return
@@ -525,10 +558,12 @@ final class TilingEngine {
         }
 
         lastAdoptionAt = ContinuousClock.now
+        let original = originalFrames[element] ?? snap.frame
+        originalFrames[element] = original
         windows[id] = ManagedWindow(
             id: id, pid: pid, bundleID: conn.bundleID, element: element,
             title: snap.title, floating: floats, minimized: snap.minimized,
-            fullscreen: false, lastVisibleFrame: snap.frame, originalFrame: snap.frame
+            fullscreen: false, lastVisibleFrame: snap.frame, originalFrame: original
         )
         // Record *why* it is out of the layout, not just that it is —
         // `restore` lifts a named reason, so a window adopted while already
@@ -569,6 +604,7 @@ final class TilingEngine {
             Task {
                 if let snap = await conn.snapshot(of: id) {
                     self.windows[id]?.title = snap.title
+                    self.reclassifyOnTitleChange(id, title: snap.title)
                 }
             }
 
@@ -617,6 +653,16 @@ final class TilingEngine {
         applyAll()
     }
 
+    /// Re-synchronise after the machine was asleep, locked, or switched
+    /// away from. Counts as activity so the audit leaves its idle cadence,
+    /// then re-checks Spaces and re-drives every frame.
+    func resumeFromIdle() {
+        lastActivity = ContinuousClock.now
+        audit()
+        scheduleSpaceReconcile()
+        applyAll()
+    }
+
     /// Coalesces Space reconciles and waits out the transition animation.
     func scheduleSpaceReconcile() {
         spaceDebounce?.cancel()
@@ -642,7 +688,33 @@ final class TilingEngine {
     /// never written to any window.
     private func reconcileSpaces() {
         guard !paused else { return }
-        let onScreen = SpaceProbe.onScreenWindowsByPID()
+        // A native-fullscreen window sits on its own Space, so while one
+        // exists the on-screen list describes a Space the tiled windows were
+        // never on. `SpaceMembership` refuses a wholesale withdrawal anyway,
+        // but there is nothing useful to learn from the probe here.
+        guard !windows.values.contains(where: { $0.fullscreen }) else { return }
+        // The lock screen and the screen saver own the display and report
+        // almost nothing else on it. Judging window membership against that
+        // would be judging against a Space the user cannot even see.
+        let ownedBySystem: Set<String> = [
+            "com.apple.loginwindow", "com.apple.ScreenSaver.Engine", "com.apple.SecurityAgent",
+        ]
+        if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           ownedBySystem.contains(front) {
+            return
+        }
+        // Drop our own stashed windows from the live side. "On screen" in
+        // `CGWindowList` means *on this Space and not minimized* — it says
+        // nothing about geometry, so a window parked off-display by
+        // `StashPlanner` is still listed. Counting those against a candidate
+        // set that only holds *visible* windows makes the shortfall negative
+        // for any app with windows on two workspaces, which silently
+        // disables the whole check for most of a real desktop.
+        let displayFrames = displays.map(\.frame)
+        let onScreen = SpaceProbe.onScreenWindowsByPID().compactMapValues { rects -> [CGRect]? in
+            let onDisplay = rects.filter { !StashPlanner.looksStashed($0, displays: displayFrames) }
+            return onDisplay.isEmpty ? nil : onDisplay
+        }
         // No information — an API failure must never read as "every window
         // left the Space" (invariant 1).
         guard !onScreen.isEmpty else { return }
@@ -1151,22 +1223,35 @@ final class TilingEngine {
     struct PaletteWindow {
         let id: WindowID
         let title: String
+        /// Human-readable name, for the palette. Not stable — it is
+        /// localized, and falls back to the bundle id when the app cannot
+        /// be resolved, so scripts must key off `bundleID` instead.
         let app: String
+        let bundleID: String
         let workspace: Int?    // nil = native fullscreen, marked in the UI
         let icon: NSImage?
     }
 
     func paletteWindows() -> [PaletteWindow] {
         windows.values.compactMap { mw in
-            guard !mw.minimized else { return nil }
+            // A window on another Space stays listed. Activating its app is
+            // what takes the user there, the same route native-fullscreen
+            // windows are summoned by (§4.4) — dropping them would make the
+            // palette the one place that cannot reach them. Genuinely
+            // minimized windows, and windows of an app the user hid, stay
+            // out: those are states the user chose and can undo directly.
+            let offSpace = mw.withdrawnFor.contains(.offSpace)
+            guard !mw.withdrawnFor.contains(.minimized),
+                  !mw.withdrawnFor.contains(.appHidden) else { return nil }
             let ws = model.workspace(containing: mw.id)
-            guard ws != nil || mw.fullscreen else { return nil }
+            guard ws != nil || mw.fullscreen || offSpace else { return nil }
             let running = NSRunningApplication(processIdentifier: mw.pid)
             return PaletteWindow(
                 id: mw.id,
                 title: mw.title,
                 app: running?.localizedName ?? mw.bundleID ?? "?",
-                workspace: ws?.id,
+                bundleID: mw.bundleID ?? "",
+                workspace: ws?.id ?? (offSpace ? mw.suspendedWorkspace : nil),
                 icon: running?.icon
             )
         }
@@ -1462,6 +1547,42 @@ final class TilingEngine {
                     learnFloatRule(pid: mw.pid, bundleID: bundleID)
                 }
             }
+        }
+    }
+
+    /// Applies a title-pattern rule that only became true once the app got
+    /// around to setting its title.
+    ///
+    /// Several shipped rules match on title — `^zoom floating`,
+    /// `Quick Access`, Activity Monitor's `^(Inspect|Sample)` — and plenty
+    /// of apps create a window first and title it a moment later. Classify
+    /// once at adoption and those rules simply never fire, which is how a
+    /// Zoom screen-share control ends up tiled into the layout.
+    ///
+    /// Only `float` and `ignore` are acted on. Forcing a window back to
+    /// tiled would undo a float the user chose by hand, and the rule cannot
+    /// tell the two apart.
+    private func reclassifyOnTitleChange(_ id: WindowID, title: String) {
+        guard let mw = windows[id], let bundleID = mw.bundleID else { return }
+        switch rules.action(bundleID: bundleID, title: title) {
+        case .ignore:
+            // Hand the window back where we found it before letting go —
+            // dropping it from management while it still sits in a tile
+            // would leave it wherever the layout last put it.
+            if let conn = connections[mw.pid] {
+                let frame = mw.originalFrame
+                nextWriteGeneration += 1
+                let generation = nextWriteGeneration
+                Task { _ = await conn.applyFrames([(id, frame)], generation: generation) }
+            }
+            removeWindow(id)
+        case .float:
+            guard let ws = model.workspace(containing: id), !ws.isFloating(id) else { return }
+            _ = ws.toggleFloat(id, defaultFrame: mw.lastVisibleFrame)
+            windows[id]?.floating = true
+            applyAll()
+        case .tile, .workspace, .none:
+            return
         }
     }
 

@@ -38,7 +38,10 @@ if ! command -v perl >/dev/null 2>&1; then
     exit 1
 fi
 
-printf '%s\n' "$*" | perl -MIO::Socket::UNIX -e '
+# Exit status follows the reply: an error reply must fail the command, or
+# `zephrctl … && next-thing` runs the next thing anyway and `set -e` never
+# trips. The reply is echoed either way.
+reply=$(printf '%s\n' "$*" | perl -MIO::Socket::UNIX -e '
     my $path = shift;
     my $sock = IO::Socket::UNIX->new(Peer => $path, Type => SOCK_STREAM())
         or die "zephrctl: cannot connect to $path: $!\n";
@@ -46,4 +49,11 @@ printf '%s\n' "$*" | perl -MIO::Socket::UNIX -e '
     print {$sock} $request;
     $| = 1;                 # stream `subscribe` line by line
     print while <$sock>;
-' "$SOCK"
+' "$SOCK")
+status=$?
+[ -n "$reply" ] && printf '%s\n' "$reply"
+[ "$status" -ne 0 ] && exit "$status"
+case "$reply" in
+    *'"ok":false'*) exit 1 ;;
+esac
+exit 0

@@ -55,6 +55,26 @@ public enum SpaceMembership {
         onScreenByPID: [pid_t: [CGRect]],
         tolerance: CGFloat = 6
     ) -> Set<WindowID> {
+        // Everything gone is not a migration, it is a Space *switch*: the
+        // user is looking at a Space none of these windows live on, and the
+        // workspace they belong to is simply not visible. Withdrawing them
+        // all would tear the whole layout out of the tree and rebuild a
+        // different one on the way back — insertion splits near the focused
+        // window and halves ratios, so the tree that returns is not the tree
+        // that left. Entering native fullscreen looks exactly like this too,
+        // because macOS gives the fullscreen window its own Space.
+        //
+        // Withdrawal is only meaningful when *some* windows left while
+        // others stayed, which is what a window dragged to another Space
+        // actually looks like.
+        guard !candidates.isEmpty else { return [] }
+        let anyPresent = candidates.contains { candidate in
+            (onScreenByPID[candidate.pid] ?? []).contains {
+                $0.approximatelyEquals(candidate.frame, tolerance: tolerance)
+            }
+        }
+        guard anyPresent else { return [] }
+
         var missing: Set<WindowID> = []
         for (pid, group) in Dictionary(grouping: candidates, by: \.pid) {
             let live = onScreenByPID[pid] ?? []
