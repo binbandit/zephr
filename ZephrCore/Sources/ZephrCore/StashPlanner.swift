@@ -63,24 +63,33 @@ public enum StashPlanner {
             width: size.width, height: size.height
         ))
 
-        for candidate in candidates {
-            // Displays are disjoint and the visible sliver lies inside the
-            // owning display, so any overlap with another display is an
-            // off-screen collision. Testing the candidate directly also
-            // catches windows that protrude past *two* edges (e.g. wider
-            // than the display and hanging below), which a single-edge
-            // protrusion check misses.
-            let collides = others.contains { $0.intersects(candidate) }
-            if !collides { return candidate }
+        // Pick the candidate that spills least onto a neighbouring display,
+        // rather than the first that spills not at all.
+        //
+        // Rejecting on *any* overlap and falling back to a corner inside the
+        // display made the common bad case far worse than it needed to be: a
+        // display flanked on both sides has no clean corner, so a candidate
+        // leaking a single point was discarded in favour of a fallback that
+        // left the window almost entirely visible. Ranking keeps the
+        // one-point answer. Order breaks ties, so the preferred corners
+        // still win when nothing spills — which is the usual case.
+        //
+        // Testing the whole candidate rather than one edge also catches a
+        // window that protrudes past two edges at once, e.g. one wider than
+        // the display and hanging below it.
+        func spill(_ candidate: CGRect) -> CGFloat {
+            others.reduce(0) { $0 + candidate.intersection($1).area }
         }
-
-        // Fully surrounded display (rare): pile at the bottom-right corner
-        // with a small visible chunk; the app-hide hybrid removes most of it.
-        return CGRect(
-            x: displayFrame.maxX - 8,
-            y: displayFrame.maxY - 8,
-            width: size.width, height: size.height
-        )
+        var best = candidates[0]
+        var bestSpill = spill(best)
+        for candidate in candidates.dropFirst() where bestSpill > 0 {
+            let value = spill(candidate)
+            if value < bestSpill {
+                best = candidate
+                bestSpill = value
+            }
+        }
+        return best
     }
 
     /// Whether a frame looks stashed relative to its display (used by crash
