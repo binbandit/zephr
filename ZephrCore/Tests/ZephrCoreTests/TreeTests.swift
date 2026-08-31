@@ -561,3 +561,93 @@ struct BalanceTests {
         try s.validate()
     }
 }
+
+@Suite("Native tab groups swap in place")
+struct TabReplaceTests {
+    private let screen = CGRect(x: 0, y: 0, width: 1600, height: 900)
+
+    /// The whole point: selecting another tab must not move anything. A
+    /// remove-then-insert would re-run placement and reflow the workspace
+    /// around a window the user only clicked a tab in.
+    @Test func replacingALeafLeavesEveryFrameIdentical() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.insertTiled(w3)
+        let before = Solver.solve(workspace: s, in: screen).placements
+
+        #expect(s.replace(w2, with: w4))
+        try s.validate()
+
+        let after = Solver.solve(workspace: s, in: screen).placements
+        #expect(s.root.windowIDs() == [w1, w4, w3])
+        #expect(after[w1]?.frame == before[w1]?.frame)
+        #expect(after[w3]?.frame == before[w3]?.frame)
+        #expect(after[w4]?.frame == before[w2]?.frame)
+    }
+
+    /// A resized slot keeps its share, not just its position.
+    @Test func replacementInheritsAnAdjustedRatio() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        _ = Solver.solve(workspace: s, in: screen)
+        _ = s.resize(w1, axis: .horizontal, delta: 0.15, minRatio: 0.05)
+        let before = Solver.solve(workspace: s, in: screen).placements
+
+        #expect(s.replace(w1, with: w3))
+        let after = Solver.solve(workspace: s, in: screen).placements
+        #expect(after[w3]?.frame == before[w1]?.frame)
+    }
+
+    @Test func floatingReplacementKeepsFrameAndStackingOrder() throws {
+        let s = ws()
+        let frame = CGRect(x: 40, y: 60, width: 300, height: 200)
+        s.insertFloating(w1, frame: frame)
+        s.insertFloating(w2, frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+
+        #expect(s.replace(w1, with: w3))
+        try s.validate()
+        #expect(s.floating[w3] == frame)
+        #expect(s.floatingOrder == [w3, w2])
+        #expect(s.floating[w1] == nil)
+    }
+
+    /// Focus follows the visible tab, or the user's next keystroke would act
+    /// on a window that is no longer on screen.
+    @Test func focusFollowsTheReplacement() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.focus(w2)
+
+        #expect(s.replace(w2, with: w3))
+        #expect(s.focusedWindow == w3)
+    }
+
+    @Test func replaceRefusesWhatItCannotDoCleanly() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+
+        #expect(!s.replace(w3, with: w4))      // `old` is not here
+        #expect(!s.replace(w1, with: w2))      // `new` already is
+        #expect(!s.replace(w1, with: w1))
+        try s.validate()
+        #expect(s.root.windowIDs() == [w1, w2])
+    }
+
+    /// The model's index must move with the swap, or the window is placed but
+    /// unreachable.
+    @Test func modelIndexFollowsTheSwap() throws {
+        let model = WorkspaceModel()
+        _ = model.syncDisplays([DisplayID(1)])
+        model.insertWindow(w1)
+        model.insertWindow(w2)
+
+        #expect(model.replaceWindow(w2, with: w3))
+        #expect(model.workspace(containing: w3) != nil)
+        #expect(model.workspace(containing: w2) == nil)
+        #expect(!model.replaceWindow(w2, with: w4))   // w2 is no longer placed
+    }
+}

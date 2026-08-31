@@ -32,6 +32,13 @@ public final class TreeNode {
     public var isContainer: Bool { kind == .container }
     public var isWindow: Bool { !isContainer }
 
+    /// Points this leaf at a different window without moving it. Backs
+    /// `Workspace.replace` - see there for why a tab group needs it.
+    func retarget(to id: WindowID) {
+        guard case .window = kind else { return }
+        kind = .window(id)
+    }
+
     init(window id: WindowID) {
         self.kind = .window(id)
         self.orientation = .horizontal

@@ -157,6 +157,35 @@ public final class Workspace {
         return true
     }
 
+    /// Swaps `old` for `new` in place, keeping the slot, its ratio, its
+    /// place in the floating order and its focus (§4.3 native tabs).
+    ///
+    /// Selecting another native macOS tab hands the layout a different
+    /// AXWindow for what is physically the same window. Removing the old node
+    /// and inserting the new one would re-run placement and drop that window
+    /// wherever the split policy decides, reflowing the whole workspace
+    /// because the user clicked a tab. Repointing the existing node is what
+    /// makes a tab group a single leaf.
+    @discardableResult
+    public func replace(_ old: WindowID, with new: WindowID) -> Bool {
+        guard old != new, !contains(new) else { return false }
+        if let node = index.removeValue(forKey: old) {
+            node.retarget(to: new)
+            index[new] = node
+        } else if let frame = floating.removeValue(forKey: old) {
+            floating[new] = frame
+            if let slot = floatingOrder.firstIndex(of: old) { floatingOrder[slot] = new }
+        } else {
+            return false
+        }
+        if let solved = lastSolvedFrames.removeValue(forKey: old) {
+            lastSolvedFrames[new] = solved
+        }
+        // No `normalize()`: the shape of the tree is deliberately untouched.
+        if focusedWindow == old { focusedWindow = new }
+        return true
+    }
+
     // MARK: - Focus
 
     /// Marks `id` focused and records the path from root for later descents.

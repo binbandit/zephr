@@ -177,6 +177,16 @@ public final class WorkspaceModel {
         windowWorkspace[id] = ws.id
     }
 
+    /// See `Workspace.replace`. `new` must not already be placed.
+    @discardableResult
+    public func replaceWindow(_ old: WindowID, with new: WindowID) -> Bool {
+        guard let wsID = windowWorkspace[old], windowWorkspace[new] == nil,
+              let ws = workspaces[wsID], ws.replace(old, with: new) else { return false }
+        windowWorkspace.removeValue(forKey: old)
+        windowWorkspace[new] = wsID
+        return true
+    }
+
     @discardableResult
     public func removeWindow(_ id: WindowID) -> Bool {
         guard let wsID = windowWorkspace.removeValue(forKey: id) else { return false }

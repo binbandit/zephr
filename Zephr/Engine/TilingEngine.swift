@@ -666,9 +666,13 @@ final class TilingEngine {
         let listedAfterAdoption = snap.minimized ? nil : await conn.listedWindowIDs()
 
         if !snap.minimized {
-            model.insertWindow(id, workspace: workspaceID, floating: floats, frame: snap.frame)
-            if let listedAfterAdoption {
-                reconcileTabs(pid: pid, listed: listedAfterAdoption)
+            // Opening a tab replaces the tab it was opened from, so the new
+            // window inherits that slot rather than being placed anew.
+            let tookOverASlot = listedAfterAdoption.map {
+                reconcileTabs(pid: pid, listed: $0, adopting: id)
+            } ?? false
+            if !tookOverASlot {
+                model.insertWindow(id, workspace: workspaceID, floating: floats, frame: snap.frame)
             }
             applyAll()
         }
@@ -715,8 +719,10 @@ final class TilingEngine {
             }
             Task {
                 let listed = await conn.listedWindowIDs()
-                self.removeWindow(id)
+                // Before the removal, while the dead tab still holds its slot:
+                // that is what the promoted sibling pairs with and inherits.
                 if let listed { self.reconcileTabs(pid: pid, listed: listed) }
+                self.removeWindow(id)
             }
 
         case .windowMoved(let id), .windowResized(let id):
@@ -787,30 +793,78 @@ final class TilingEngine {
     /// The readable "tab group" signal §4.3 asks for is the app's own window
     /// list: macOS drops a background tab from `kAXWindowsAttribute` while
     /// keeping its element alive, so what the app lists is what is really on
-    /// screen. Anything managed and missing is a tab, and withdrawal is by
-    /// reason and reversible, so selecting that tab again brings its node
-    /// straight back to the workspace it came from.
-    private func reconcileTabs(pid: pid_t, listed: Set<WindowID>) {
+    /// screen.
+    ///
+    /// Withdrawing the old tab and restoring the new one is not enough, and
+    /// this is the part that matters: restoring runs placement again, so the
+    /// window lands wherever the split policy puts it and the workspace
+    /// reflows because the user clicked a tab. Instead the two are **paired**
+    /// and swapped in place, which is what makes a tab group a single leaf.
+    /// Pairing is by frame - two tabs of one window group share it, two
+    /// separate windows of the same app do not.
+    ///
+    /// Returns true when `adopting` was placed by taking over a slot, so the
+    /// caller knows not to insert it again.
+    @discardableResult
+    private func reconcileTabs(pid: pid_t, listed: Set<WindowID>, adopting: WindowID? = nil) -> Bool {
         // Never conclude from a wholesale disappearance. An app that answers
         // with an empty list is the §6.3 failure mode, not an app whose every
         // window turned into a background tab - the same call `SpaceMembership`
         // makes, and for the same reason (invariant 1).
-        guard !listed.isEmpty else { return }
-        var changed = false
+        guard !listed.isEmpty else { return false }
+
+        var leaving: [WindowID] = []
+        var entering: [WindowID] = []
         for (id, mw) in windows where mw.pid == pid {
-            let wasOut = mw.withdrawnFor.contains(.backgroundTab)
-            let isOut = !listed.contains(id)
-            if isOut {
-                withdraw(id, reason: .backgroundTab)
-            } else {
-                restore(id, reason: .backgroundTab)
+            let inTree = model.workspace(containing: id) != nil
+            if listed.contains(id) {
+                // Held out for another reason as well (minimized, hidden) is
+                // not this pass's business to lift.
+                if !inTree, mw.withdrawnFor == [.backgroundTab] { entering.append(id) }
+            } else if inTree {
+                leaving.append(id)
             }
-            changed = changed || wasOut != isOut
         }
-        if changed {
-            let managed = windows.values.count { $0.pid == pid }
-            Self.log.info("tabs reconciled for pid \(pid): \(listed.count) of \(managed) listed")
+        if let adopting, listed.contains(adopting) { entering.append(adopting) }
+
+        var placedAdoptee = false
+        var changed = false
+
+        for out in leaving {
+            guard let outFrame = windows[out]?.lastVisibleFrame,
+                  let slot = entering.firstIndex(where: {
+                      guard let f = windows[$0]?.lastVisibleFrame else { return false }
+                      return f.approximatelyEquals(outFrame, tolerance: 4)
+                  })
+            else { continue }
+            let incoming = entering.remove(at: slot)
+            // Captured before the swap: afterwards `out` is no longer placed,
+            // and it needs somewhere to return to if it is selected again.
+            let home = model.workspace(containing: out)?.id
+            guard model.replaceWindow(out, with: incoming) else { continue }
+            windows[out]?.withdrawnFor.insert(.backgroundTab)
+            windows[out]?.minimized = true
+            windows[out]?.suspendedWorkspace = home
+            windows[incoming]?.withdrawnFor.remove(.backgroundTab)
+            windows[incoming]?.minimized = false
+            windows[incoming]?.suspendedWorkspace = nil
+            if incoming == adopting { placedAdoptee = true }
+            changed = true
         }
+
+        // Anything left over is not a tab swap: a tab dragged out into its own
+        // window, or a window that genuinely came or went.
+        for out in leaving where model.workspace(containing: out) != nil {
+            withdraw(out, reason: .backgroundTab)
+            changed = true
+        }
+        for incoming in entering where incoming != adopting {
+            restore(incoming, reason: .backgroundTab)
+            changed = true
+        }
+
+        if changed { applyAll() }
+        return placedAdoptee
     }
 
     /// Debounced follow-up after the user let go of the mouse.
