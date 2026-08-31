@@ -215,6 +215,18 @@ final class HotkeyService {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5), tolerance: .seconds(2))
                 guard let self else { return }
+                // Tap health. Recovery from `.tapDisabledByTimeout` relies on
+                // that event reaching our callback — but a tap disabled while
+                // the process was suspended, or by a disable we never saw,
+                // stays dead silently and every shortcut stops working with
+                // no indication why. Cheap to check, catastrophic to miss.
+                if let tap = self.tap, !CGEvent.tapIsEnabled(tap: tap) {
+                    Self.log.warning("event tap was disabled out from under us — re-enabling")
+                    self.swallowedKeyUps.removeAll()
+                    self.closeLayer()
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
+
                 let active = IsSecureEventInputEnabled()
                 if active != self.secureInputActive {
                     self.secureInputActive = active
