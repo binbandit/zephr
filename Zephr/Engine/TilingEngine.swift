@@ -192,6 +192,17 @@ final class TilingEngine {
             guard let pid = app?.processIdentifier else { return }
             MainActor.assumeIsolated { TilingEngine.shared?.detachApp(pid: pid) }
         }
+        // `kAXUIElementDestroyed` is unreliable — AeroSpace keeps a global
+        // mouse-up hook for exactly this reason. Clicking an unfocused
+        // window's close button can go unreported, and the audit both skips
+        // while a mouse button is held and drops to a ~30 s cadence when the
+        // desktop looks idle, so the tile of a closed window could sit there
+        // for half a minute. A release is also the moment a torn-out tab or
+        // a hand-moved window has settled.
+        mouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { _ in
+            MainActor.assumeIsolated { TilingEngine.shared?.noteUserSettled() }
+        })
+
         // Waking, unlocking, or switching back from another user account
         // leaves the layout unreconciled: none of them necessarily changes
         // the display arrangement, so `DisplayService` sees nothing, and the
@@ -256,7 +267,10 @@ final class TilingEngine {
                 // Backstop for a missed Space notification. The deep sweep
                 // only, so an idle desktop still costs one window-list read
                 // every ~30 s.
-                if tick % 10 == 0 { self.reconcileSpaces() }
+                if tick % 10 == 0 {
+                    self.reconcileSpaces()
+                    self.attachNewApps()
+                }
             }
         }
 
@@ -433,6 +447,22 @@ final class TilingEngine {
         }
     }
 
+    /// Picks up apps the launch notification missed.
+    ///
+    /// `runningApplications` is enumerated once at start, and after that an
+    /// app only becomes managed through `didLaunchApplication` — which
+    /// requires it to be `.regular` at that instant. An app that starts as
+    /// an accessory and calls `TransformProcessType` later (common for
+    /// Electron and Qt apps, and anything with a "show in Dock" toggle), or
+    /// whose launch notification was simply dropped, would stay unmanaged
+    /// for the rest of the session.
+    private func attachNewApps() {
+        for app in NSWorkspace.shared.runningApplications
+        where app.activationPolicy == .regular && connections[app.processIdentifier] == nil {
+            attachApp(app)
+        }
+    }
+
     private func detachApp(pid: pid_t) {
         guard let conn = connections.removeValue(forKey: pid) else { return }
         hub.unwatchApp(pid: pid)
@@ -478,9 +508,17 @@ final class TilingEngine {
         syncAppState()
         guard let conn = connections[pid] else { return }
         Task {
-            guard let element = await conn.focusedWindowElement(),
-                  let id = await conn.id(for: element) else { return }
-            self.noteFocused(id)
+            guard let element = await conn.focusedWindowElement() else { return }
+            if let id = await conn.id(for: element) {
+                self.noteFocused(id)
+                return
+            }
+            // The window the user just switched to is one we never saw
+            // created. `kAXWindowCreated` is lossy, and waiting for the
+            // audit means up to 30 s of the focused window being unmanaged.
+            // Adopting here is the cheapest recovery there is.
+            await self.adopt(element: element, pid: pid)
+            if let id = await conn.id(for: element) { self.noteFocused(id) }
         }
     }
 
@@ -586,6 +624,16 @@ final class TilingEngine {
             }
         }
 
+        // Tearing a tab out of a browser or Finder creates a window while
+        // the mouse is still down. Adopting it there starts writing frames
+        // to a window the user is mid-gesture with, which fights the drag
+        // and lands it somewhere they did not drop it. The audit's
+        // unknown-window sweep picks it up once the button is released.
+        if NSEvent.pressedMouseButtons & 1 != 0 {
+            await conn.unregister(id)
+            return
+        }
+
         lastAdoptionAt = ContinuousClock.now
         let original = originalFrames[element] ?? snap.frame
         originalFrames[element] = original
@@ -680,6 +728,17 @@ final class TilingEngine {
         windows[id]?.suspendedWorkspace = nil
         model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
         applyAll()
+    }
+
+    /// Debounced follow-up after the user let go of the mouse.
+    func noteUserSettled() {
+        lastActivity = ContinuousClock.now
+        settleDebounce?.cancel()
+        settleDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.audit()
+        }
     }
 
     /// Re-synchronise after the machine was asleep, locked, or switched
@@ -1409,6 +1468,10 @@ final class TilingEngine {
     }
 
     private var spaceDebounce: Task<Void, Never>?
+    private var settleDebounce: Task<Void, Never>?
+    /// Minimum sizes seen once, awaiting a confirming second reading.
+    private var minimumCandidates: [WindowID: CGSize] = [:]
+    private var mouseUpMonitor: Any?
 
     /// Monotonic stamp ordering frame batches; see `applyFrames`.
     private var nextWriteGeneration: UInt64 = 0
@@ -1562,9 +1625,26 @@ final class TilingEngine {
         // not refusing to be tiled. Remember it and re-solve, so the next
         // layout asks for something it can actually accept — and so the
         // veto path never sees it and never floats an ordinary window.
-        for (id, size) in result.minimums where windows[id]?.minimumSize != size {
-            windows[id]?.minimumSize = size
-            Self.log.info("window \(id.raw) will not go below \(Int(size.width))x\(Int(size.height))")
+        //
+        // Believed only on a second identical reading. A read-back taken
+        // straight after a write can be stale — an app that has not resized
+        // yet reports its old geometry, which is indistinguishable from a
+        // clamp — and acting on that recorded minimums the window promptly
+        // contradicted.
+        for (id, size) in result.minimums {
+            let seen = CGSize(width: size.width.rounded(), height: size.height.rounded())
+            guard minimumCandidates[id] == seen else {
+                minimumCandidates[id] = seen
+                continue
+            }
+            // Per axis: a width clamp says nothing about height.
+            var merged = windows[id]?.minimumSize ?? .zero
+            if seen.width > 0 { merged.width = seen.width }
+            if seen.height > 0 { merged.height = seen.height }
+            guard windows[id]?.minimumSize != merged else { continue }
+            windows[id]?.minimumSize = merged
+            Self.log.info(
+                "window \(id.raw) will not go below \(Int(merged.width))x\(Int(merged.height))")
             applyAll()
         }
         for (id, actual) in result.applied {
@@ -2205,6 +2285,13 @@ final class TilingEngine {
         }
     }
 
+    /// Where command-line tools actually live. A GUI-launched app inherits
+    /// a minimal `PATH` — `/usr/bin:/bin:/usr/sbin:/sbin` — so the very
+    /// integration §4.8 advertises, `on-workspace-changed = ["sketchybar
+    /// --trigger …"]`, exits 127 and does nothing. Homebrew's directories
+    /// are appended rather than prepended so a user's own `PATH` still wins.
+    private static let toolPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/homebrew/sbin"]
+
     private func runWorkspaceCallbacks(_ workspace: Int) {
         for command in workspaceCallbacks {
             let process = Process()
@@ -2212,11 +2299,28 @@ final class TilingEngine {
             process.arguments = ["-c", command]
             var env = ProcessInfo.processInfo.environment
             env["ZEPHR_WORKSPACE"] = String(workspace)
+            let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            let existing = Set(path.split(separator: ":").map(String.init))
+            env["PATH"] = ([path] + Self.toolPaths.filter { !existing.contains($0) })
+                .joined(separator: ":")
             process.environment = env
+            // A callback that fails must say so. `run()` only throws when
+            // /bin/sh itself cannot start, so without this a mistyped or
+            // missing command is completely silent (§4.6: never fail
+            // silently).
+            // `log` is MainActor-isolated and this handler is not, so the
+            // logger is captured rather than reached through `Self`.
+            let log = Self.log
+            process.terminationHandler = { finished in
+                guard finished.terminationStatus != 0 else { return }
+                let hint = finished.terminationStatus == 127 ? " (command not found)" : ""
+                log.warning(
+                    "workspace callback exited \(finished.terminationStatus)\(hint): \(command)")
+            }
             do {
                 try process.run()
             } catch {
-                Self.log.warning("workspace callback failed: \(error.localizedDescription)")
+                Self.log.warning("workspace callback could not start: \(error.localizedDescription)")
             }
         }
     }
