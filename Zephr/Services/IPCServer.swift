@@ -355,6 +355,14 @@ final class IPCServer {
             default: return bad("layout takes row|column, or nothing to flip")
             }
         case "next-display": engine.perform(.focusNextDisplay); return ok
+        case "pause-display", "resume-display", "toggle-pause-display":
+            engine.perform(.togglePauseDisplay); return ok
+        case "move-to-display":
+            let dir = parts.dropFirst().first.flatMap(Direction.init(rawValue:))
+            engine.perform(.moveWindowToDisplay(dir)); return ok
+        case "move-workspace-to-display":
+            let dir = parts.dropFirst().first.flatMap(Direction.init(rawValue:))
+            engine.perform(.moveWorkspaceToDisplay(dir)); return ok
         case "float-mode": engine.perform(.toggleWorkspaceFloatMode); return ok
         case "doctor":
             // Rival detection forks a process, which must not happen on the

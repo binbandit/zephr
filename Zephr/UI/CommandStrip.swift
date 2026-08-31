@@ -189,6 +189,8 @@ struct CommandStripView: View {
             GridRow { sheetItem("r", "Resize: l/j bigger, h/k smaller"); sheetItem("=", "Balance sizes") }
             GridRow { sheetItem("q", "Close window"); sheetItem("p", "Palette") }
             GridRow { sheetItem("tab", "Next display"); sheetItem("w", "Rescue all windows") }
+            GridRow { sheetItem("⇧ tab", "Send window to next display"); sheetItem("d", "Send workspace to display") }
+            GridRow { sheetItem("⇧ D", "Pause this display only"); sheetItem("", "") }
             GridRow { sheetItem("g", "Group with next"); sheetItem("⇧ G", "Ungroup everything") }
             GridRow { sheetItem("o", "Row ↔ column"); sheetItem("", "") }
             GridRow {

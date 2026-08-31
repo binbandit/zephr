@@ -90,6 +90,11 @@ private struct MenuContent: View {
             Button("Pause Zephr (release windows & keys)") {
                 AppDelegate.shared?.engine.perform(.togglePause)
             }
+            if appState.displayWorkspaces.count > 1 {
+                Button("Pause / Resume This Display Only") {
+                    AppDelegate.shared?.engine.perform(.togglePauseDisplay)
+                }
+            }
         }
 
         Divider()

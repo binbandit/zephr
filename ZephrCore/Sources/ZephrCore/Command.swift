@@ -27,9 +27,15 @@ public enum Command: Sendable, Equatable {
     case balance
     case rescueWindows
     case focusNextDisplay
+    /// Send the focused window to another display. `nil` = the next one.
+    case moveWindowToDisplay(Direction?)
+    /// Send the whole current workspace to another display.
+    case moveWorkspaceToDisplay(Direction?)
     case closeWindow
     case toggleWorkspaceFloatMode
     case togglePause
+    /// Suspend or resume tiling on the focused display only.
+    case togglePauseDisplay
 
     /// Whether the command's direct chord adds ⇧ (move variants).
     public var isMoveVariant: Bool {
@@ -60,9 +66,12 @@ public enum Command: Sendable, Equatable {
         case .balance: "Balance"
         case .rescueWindows: "Rescue windows"
         case .focusNextDisplay: "Next display"
+        case .moveWindowToDisplay(let d): d.map { "Send window \($0.rawValue)" } ?? "Send window to next display"
+        case .moveWorkspaceToDisplay(let d): d.map { "Send workspace \($0.rawValue)" } ?? "Send workspace to next display"
         case .closeWindow: "Close window"
         case .toggleWorkspaceFloatMode: "Workspace float mode"
         case .togglePause: "Pause / resume Zephr"
+        case .togglePauseDisplay: "Pause / resume this display"
         }
     }
 }
