@@ -143,6 +143,7 @@ final class HotkeyService {
 
     func setBindings(_ bindings: [KeyBinding]) {
         userBindings = bindings
+        Self.log.info("loaded \(bindings.count) user key binding(s)")
     }
 
     /// A user binding matching this chord, if any.
@@ -152,6 +153,7 @@ final class HotkeyService {
                   mods == Modifiers(control: control, option: option, shift: shift, command: command),
                   LeaderBinding.keyCodesByName[binding.key] == keyCode
             else { continue }
+            Self.log.info("user chord matched: \(binding.command.label)")
             return binding.command
         }
         return nil
@@ -164,6 +166,7 @@ final class HotkeyService {
                   shift == mods.shift,
                   LeaderBinding.keyCodesByName[binding.key] == keyCode
             else { continue }
+            Self.log.info("user layer key matched: \(binding.command.label)")
             return binding.command
         }
         return nil
