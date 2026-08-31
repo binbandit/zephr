@@ -959,6 +959,15 @@ final class TilingEngine {
     /// themselves in response - a terminal re-fits its character grid on
     /// every tab switch - so promoting on that popped the window out of the
     /// layout, and out it stayed, for an ordinary click.
+    /// NB: dragging a tiled window's own edge is deliberately *not* turned
+    /// into a split adjustment, tempting as it looks. That gesture reaches
+    /// this file as "the size changed while the button was held" — which is
+    /// indistinguishable from an app re-fitting itself during an ordinary
+    /// click, the exact confusion that used to pop a terminal out of the
+    /// layout on every tab switch. Cursor-near-an-edge does not separate
+    /// them either, because a tab strip sits on the top edge. The gap strips
+    /// give the same capability from the other side of the split, with a hit
+    /// area that means only one thing.
     private func promoteToDrag(_ id: WindowID, frame: CGRect, placedAt: CGRect) -> Bool {
         // A drag moves a window; it does not resize it. Testing the origin
         // alone is not enough: macOS anchors a resize at the bottom-left, so
