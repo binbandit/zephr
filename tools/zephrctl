@@ -8,6 +8,7 @@ set -eu
 #   zephrctl toggle-float | monocle | balance | rescue | close
 #   zephrctl group [left|right|up|down]    zephrctl flatten
 #   zephrctl layout [row|column]           (no argument flips it)
+#   zephrctl move-to-display [dir]         zephrctl move-workspace-to-display [dir]
 #   zephrctl pause | resume                zephrctl focus-window <id>
 #   zephrctl list-windows | list-workspaces | subscribe
 #
@@ -16,7 +17,7 @@ set -eu
 SOCK="$HOME/Library/Application Support/Zephr/zephr.sock"
 
 if [ "${1:-}" = "--help" ] || [ -z "${1:-}" ]; then
-    sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 

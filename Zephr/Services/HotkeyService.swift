@@ -76,7 +76,7 @@ final class HotkeyService {
         static let h: Int64 = 4, j: Int64 = 38, k: Int64 = 40, l: Int64 = 37
         static let t: Int64 = 17, m: Int64 = 46, s: Int64 = 1, v: Int64 = 9
         static let r: Int64 = 15, w: Int64 = 13, p: Int64 = 35, q: Int64 = 12
-        static let g: Int64 = 5, o: Int64 = 31
+        static let g: Int64 = 5, o: Int64 = 31, d: Int64 = 2
         static let space: Int64 = 49, tab: Int64 = 48, escape: Int64 = 53
         static let equals: Int64 = 24, minus: Int64 = 27, grave: Int64 = 50
         static let slash: Int64 = 44
@@ -438,9 +438,11 @@ final class HotkeyService {
             default: return false
             }
         }
-        if mods == chordMoveMods {
+            if mods == chordMoveMods {
             if let dir = direction(for: keyCode) { onCommand?(.move(dir)); return true }
             if let n = workspaceNumber(for: keyCode) { onCommand?(.moveToWorkspace(n)); return true }
+            // Pairs with the plain chord's "focus next display".
+            if keyCode == Key.grave { onCommand?(.moveWindowToDisplay(nil)); return true }
             return false
         }
         return false
@@ -502,7 +504,12 @@ final class HotkeyService {
             onTogglePalette?()
         case Key.w: onCommand?(.rescueWindows); layerCommandIssued()
         case Key.q: onCommand?(.closeWindow); layerCommandIssued()
+        // tab / ⇧tab mirror the h j k l pairing: plain moves your attention,
+        // shift takes the window with you. d sends the whole workspace.
+        case Key.tab where mods.shift: onCommand?(.moveWindowToDisplay(nil)); layerCommandIssued()
         case Key.tab: onCommand?(.focusNextDisplay); layerCommandIssued()
+        case Key.d where mods.shift: onCommand?(.togglePauseDisplay); layerCommandIssued()
+        case Key.d: onCommand?(.moveWorkspaceToDisplay(nil)); layerCommandIssued()
         case Key.slash where mods.shift: onToggleHelp?()
         default: rearmLayerTimeout() // unknown keys are consumed and ignored
         }

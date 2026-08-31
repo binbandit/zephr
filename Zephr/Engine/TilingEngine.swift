@@ -1009,14 +1009,46 @@ final class TilingEngine {
         dropOverlay?.update(frame: nil)
         dragSession = nil
 
+        // Dropped onto another window's zone: re-tile beside it, in *that*
+        // window's workspace. `dragMoved` finds targets on whichever display
+        // the cursor is over, so looking the target up in the dragged
+        // window's own workspace meant a drop onto another display matched
+        // nothing and silently did nothing at all.
         if let (target, edge) = session.target,
-           let ws = model.workspace(containing: session.id),
-           ws.contains(target),
-           ws.retile(session.id, at: target, edge: edge) {
-            windows[session.id]?.floating = false
-            applyAll()
-            focusWindow(session.id)
+           let destination = model.workspace(containing: target) {
+            model.moveWindow(session.id, toWorkspace: destination.id)
+            if destination.retile(session.id, at: target, edge: edge) {
+                windows[session.id]?.floating = false
+                applyAll()
+                focusWindow(session.id)
+                return
+            }
         }
+
+        // Dropped on empty space. If that space belongs to another display,
+        // the window has to change workspace: a drag leaves it floating, and
+        // the solver clamps every float into its own workspace's display —
+        // so a window released over a second monitor was yanked straight
+        // back to the one it came from, which is exactly what it looks like.
+        guard let current = model.workspace(containing: session.id),
+              let frame = current.floating[session.id] ?? windows[session.id]?.lastVisibleFrame,
+              let display = displayContaining(frame.center),
+              current.homeDisplay != display.id
+        else {
+            // Same display, no target: leave it where the user put it.
+            applyAll()
+            return
+        }
+        let destination = model.activeWorkspace(on: display.id)
+        model.moveWindow(session.id, toWorkspace: destination.id)
+        // The drag floated it; a drop on open space means "put it here", so
+        // give it back to the layout rather than leaving a stray float.
+        if destination.isFloating(session.id) {
+            _ = destination.toggleFloat(session.id, defaultFrame: frame)
+        }
+        windows[session.id]?.floating = false
+        applyAll()
+        focusWindow(session.id)
     }
 
     // MARK: - Gap drag-resize (§4.3)
@@ -1238,6 +1270,27 @@ final class TilingEngine {
                   let idx = displays.firstIndex(where: { $0.id == current }) else { return }
             focusDisplay(displays[(idx + 1) % displays.count])
 
+        case .moveWindowToDisplay(let direction):
+            guard let f = model.focusedWindow,
+                  let target = display(inDirection: direction) else { return }
+            let destination = model.activeWorkspace(on: target.id)
+            guard model.moveWindow(f, toWorkspace: destination.id) else { return }
+            model.focusDisplay(target.id)
+            applyAll()
+            focusWindow(f)
+
+        case .moveWorkspaceToDisplay(let direction):
+            guard let ws = model.focusedWorkspace,
+                  let target = display(inDirection: direction) else { return }
+            let affected = model.moveWorkspace(ws.id, toDisplay: target.id)
+            guard !affected.isEmpty else { return }
+            applyAll()
+            focusModelFallback()
+
+        case .togglePauseDisplay:
+            guard let display = model.focusedDisplay else { return }
+            togglePause(display: display)
+
         case .closeWindow:
             guard let f = model.focusedWindow, let mw = windows[f],
                   let conn = connections[mw.pid] else { return }
@@ -1260,6 +1313,53 @@ final class TilingEngine {
 
     /// Paused: every window restored on screen, apps unhidden, nothing
     /// enforced, hotkeys released. Resume re-applies the model.
+    /// Displays where tiling is suspended. Separate from the global pause:
+    /// with a laptop beside an external it is normal to want one screen
+    /// managed and the other left exactly as the user arranged it — a video
+    /// call, a design tool, anything with its own idea of window layout —
+    /// without giving up tiling everywhere else.
+    private var pausedDisplays: Set<DisplayID> = []
+
+    func isPaused(display: DisplayID) -> Bool {
+        paused || pausedDisplays.contains(display)
+    }
+
+    /// Suspends or resumes tiling on one display, leaving the rest alone.
+    func togglePause(display: DisplayID) {
+        if pausedDisplays.remove(display) != nil {
+            applyDisplay(display)
+        } else {
+            pausedDisplays.insert(display)
+            releaseWindows(on: display)
+        }
+        syncAppState()
+        onEvent?("display_pause_changed", [
+            "display": "\(display.raw)",
+            "paused": pausedDisplays.contains(display) ? "true" : "false",
+        ])
+    }
+
+    /// Brings the display's stashed windows back on screen before we stop
+    /// managing it. Leaving them parked off-screen with nothing left to
+    /// re-place them is how a pause loses windows (invariant 1).
+    private func releaseWindows(on display: DisplayID) {
+        var perApp: [pid_t: [(WindowID, CGRect)]] = [:]
+        for mw in windows.values where !mw.minimized && !isVisible(mw.id) {
+            guard model.workspace(containing: mw.id)?.homeDisplay == display else { continue }
+            perApp[mw.pid, default: []].append((mw.id, mw.lastVisibleFrame))
+        }
+        let now = ContinuousClock.now
+        for (pid, batch) in perApp {
+            guard let conn = connections[pid] else { continue }
+            for (id, frame) in batch { pendingWrites[id] = (frame, now) }
+            nextWriteGeneration += 1
+            let generation = nextWriteGeneration
+            Task {
+                self.noteWriteResults(await conn.applyFrames(batch, generation: generation))
+            }
+        }
+    }
+
     func setPaused(_ value: Bool) {
         guard value != paused else { return }
         paused = value
@@ -1298,6 +1398,10 @@ final class TilingEngine {
             gapResizer?.clear()
             dropOverlay?.update(frame: nil)
         } else {
+            // A global resume means "manage everything again"; leaving a
+            // display still individually paused would make the menu item a
+            // lie.
+            pausedDisplays.removeAll()
             applyAll()
             focusModelFallback()
         }
@@ -1434,6 +1538,18 @@ final class TilingEngine {
         syncAppState()
     }
 
+    /// The display a display-targeted command should act on: the one in
+    /// `direction`, or simply the next one when no direction is given.
+    /// "Next" is what a single key can express, and with two displays — the
+    /// overwhelmingly common case — it is also unambiguous.
+    private func display(inDirection direction: Direction?) -> DisplayInfo? {
+        guard displays.count > 1 else { return nil }
+        if let direction { return displayNeighbor(direction: direction) }
+        guard let current = model.focusedDisplay,
+              let idx = displays.firstIndex(where: { $0.id == current }) else { return nil }
+        return displays[(idx + 1) % displays.count]
+    }
+
     private func displayNeighbor(direction: Direction) -> DisplayInfo? {
         guard let currentID = model.focusedDisplay,
               let current = displays.first(where: { $0.id == currentID }) else { return nil }
@@ -1532,7 +1648,7 @@ final class TilingEngine {
     }
 
     private func applyDisplay(_ displayID: DisplayID) {
-        guard !paused else { return }
+        guard !isPaused(display: displayID) else { return }
         guard let info = displays.first(where: { $0.id == displayID }) else { return }
         let active = model.activeWorkspace(on: displayID)
         var minimums: [WindowID: CGSize] = [:]
