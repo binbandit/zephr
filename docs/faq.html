@@ -57,7 +57,7 @@
 
 <h2 id="spaces"><a class="anchor" href="#spaces">Why virtual workspaces instead of macOS Spaces?</a></h2>
 <p>Apple provides no public API to create, switch, or move windows between Spaces — tools that control Spaces do it by disabling SIP, which Zephr will never ask for. Zephr's workspaces are its own, engineered to be seamless: computed off-screen stashing that adapts to any monitor arrangement, app-hiding so Mission Control stays clean, and a hard never-lose-a-window guarantee.</p>
-<p><strong>Known limitation:</strong> Zephr is not yet Space-aware. It manages every window an app reports, including windows sitting on another native Space, so mixing Spaces with Zephr workspaces currently leaves empty-looking tiles. Use Zephr's workspaces instead of Spaces until this lands.</p>
+<p>Windows on your other native Spaces are left alone. Zephr notices when a window moves to another Space and drops it out of the layout until it comes back, so its tile closes instead of holding room for something you cannot see. It works this out from the public window list, never from window titles &mdash; reading those would require the Screen Recording permission, and Zephr will not ask for one it does not need.</p>
 
 <h2 id="battery"><a class="anchor" href="#battery">Will it drain my battery?</a></h2>
 <p>It's designed not to: event-driven first, with a reconciliation audit that only runs while things are actually happening (a deep sweep every ~30&nbsp;s at idle), coalesced timers, and per-app queues at sensible QoS. The design budget is &lt;0.5% idle CPU (not yet measured in a release lane). If you ever see it misbehave in Activity Monitor, that's a bug — report it.</p>
