@@ -88,14 +88,14 @@ enum ImportService {
         rulesAdded = seen.count
         config.addRules(seen)
 
-        sections.append("Rectangle: nothing to import — its snapping shortcuts are superseded by tiling itself.")
+        sections.append("Rectangle: nothing to import - its snapping shortcuts are superseded by tiling itself.")
         return Outcome(report: sections.joined(separator: "\n\n"), rulesAdded: rulesAdded)
     }
 
     static func runAndShowReport(config: ConfigService) {
         let outcome = run(config: config)
         let alert = NSAlert()
-        alert.messageText = "Import complete — \(outcome.rulesAdded) rule(s) added"
+        alert.messageText = "Import complete - \(outcome.rulesAdded) rule(s) added"
         alert.informativeText = outcome.report
         alert.addButton(withTitle: "Done")
         alert.addButton(withTitle: "Open Config")

@@ -335,7 +335,7 @@ struct ConfigTests {
         // bare message ("missing value") points at a line that looks fine.
         #expect(throws: ConfigError(
             line: 2,
-            message: "missing value for `focus-border-color` — `#` starts a comment; quote it as \"#7AA2F7\""
+            message: "missing value for `focus-border-color` - `#` starts a comment; quote it as \"#7AA2F7\""
         )) {
             _ = try ConfigFile.parse("[layout]\nfocus-border-color = #7AA2F7")
         }

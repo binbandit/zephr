@@ -31,7 +31,7 @@
 <div class="grid">
   <div class="card"><h3>Real tiling</h3><p>An i3-style tree: automatic layouts, splits, workspaces 1–9, focus by direction. New windows split the focused one along its longer edge — good layouts with zero commands.</p></div>
   <div class="card"><h3>Discoverable</h3><p>Press the leader (⌥ Space) and a command strip shows what every key does. <kbd>?</kbd> expands the full cheat sheet. The layer teaches you the direct chords as you go.</p></div>
-  <div class="card"><h3>Never fights you</h3><p>Dialogs, pickers, and utility panels float automatically. Apps that refuse tiling are learned and left alone. Drag a window and it floats for the drag, with drop zones to re-tile.</p></div>
+  <div class="card"><h3>Never fights you</h3><p>Dialogs, pickers, and utility panels float automatically. Screen-share bars and other overlays are never mistaken for windows. An app with a minimum size is believed and the layout works around it; an app that genuinely refuses tiling is learned and left alone. Drag a window and it floats for the drag, with drop zones to re-tile.</p></div>
   <div class="card"><h3>Layouts that survive real life</h3><p>Unplug your monitor and everything migrates; plug it back in and every window returns to its exact workspace, position, and split ratio — across reboots too.</p></div>
   <div class="card"><h3>No compromises on trust</h3><p>Public APIs only. No SIP changes, ever. Hardened Runtime. One permission (Accessibility), explained and auto-detected.</p></div>
   <div class="card"><h3>Never stalls</h3><p>Every app gets its own isolated worker with strict deadlines — a hung app can never freeze window management for the rest of the system.</p></div>
@@ -63,10 +63,11 @@ just release         # Developer ID + notarized (needs an Apple Developer accoun
 <h2 id="tour"><a class="anchor" href="#tour">What you get</a></h2>
 <ul>
   <li><strong>Workspaces 1–9, per display</strong> — each monitor shows its own workspace; windows carry across display edges; re-press a workspace number to bounce back to the previous one.</li>
-  <li><strong>The palette</strong> (<kbd>⌃⌥P</kbd>) — fuzzy-search every window, workspace, and command. Deterministic app switching by name.</li>
+  <li><strong>Multi-display commands</strong> - move focus to the next display, take the window with you, send the whole workspace over, or summon a workspace onto the screen you're looking at.</li>
+  <li><strong>The palette</strong> (<kbd>⌃⌥P</kbd>) - fuzzy-search every window and workspace, plus the everyday commands. Deterministic app switching by name.</li>
   <li><strong>Display profiles</strong> — layouts are recorded per monitor arrangement and restored exactly on redock, relaunch, and reboot.</li>
-  <li><strong>Config file</strong> — <code>~/.config/zephr/config.toml</code>, written with commented defaults on first run, hot-reloaded on save. A native Settings window edits the same file without touching your comments. <a href="config.html">Full reference.</a></li>
-  <li><strong>Pause</strong> — one click releases every window and the keyboard for screen sharing or games; resume puts it all back.</li>
+  <li><strong>Config file</strong> - <code>~/.config/zephr/config.toml</code>, written with commented defaults on first run, hot-reloaded on save. A native Settings window edits the same file without touching your comments. Bind any key to any command with <code>[[bind]]</code>. <a href="config.html">Full reference.</a></li>
+  <li><strong>Pause</strong> - one click releases every window and the keyboard for screen sharing or games; resume puts it all back. Or pause a single display and let the others keep tiling.</li>
   <li><strong>zephrctl</strong> — a tiny CLI and event stream for scripting and SketchyBar. <a href="cli.html">Reference.</a></li>
   <li><strong>Quitting restores everything</strong> — every window returns to the exact frame it had before Zephr managed it.</li>
 </ul>

@@ -177,7 +177,7 @@ final class HotkeyService {
     @discardableResult
     func setLeader(_ binding: LeaderBinding) -> Bool {
         guard let code = LeaderBinding.keyCodesByName[binding.key] else {
-            Self.log.warning("unknown leader key \"\(binding.key)\" — keeping current leader")
+            Self.log.warning("unknown leader key \"\(binding.key)\" - keeping current leader")
             return false
         }
         leaderKeyCode = code
@@ -209,7 +209,7 @@ final class HotkeyService {
         // can fail before TCC propagates — retry instead of going deaf.
         // A single task owns the 30-attempt budget; re-entering start()
         // must never reset the counter (or the retry loops forever).
-        Self.log.error("event tap creation failed — retrying")
+        Self.log.error("event tap creation failed - retrying")
         guard tapRetry == nil else { return }
         tapRetry = Task { [weak self] in
             for _ in 0..<30 {
@@ -258,7 +258,7 @@ final class HotkeyService {
                 // stays dead silently and every shortcut stops working with
                 // no indication why. Cheap to check, catastrophic to miss.
                 if let tap = self.tap, !CGEvent.tapIsEnabled(tap: tap) {
-                    Self.log.warning("event tap was disabled out from under us — re-enabling")
+                    Self.log.warning("event tap was disabled out from under us - re-enabling")
                     self.swallowedKeyUps.removeAll()
                     self.closeLayer()
                     CGEvent.tapEnable(tap: tap, enable: true)
@@ -347,7 +347,7 @@ final class HotkeyService {
             )
             if let ref { carbonHotkeys.append(ref) }
         }
-        Self.log.info("Secure Input active — Carbon fallback registered (\(self.carbonHotkeys.count) chords)")
+        Self.log.info("Secure Input active - Carbon fallback registered (\(self.carbonHotkeys.count) chords)")
     }
 
     private func unregisterCarbonFallback() {

@@ -1,24 +1,84 @@
 #!/bin/sh
 set -eu
-# zephrctl — command a running Zephr over its Unix socket (docs/DESIGN.md §4.8).
+# zephrctl - command a running Zephr over its Unix socket (docs/DESIGN.md §4.8).
 #
-# Usage:
-#   zephrctl focus left|down|up|right      zephrctl move left|down|up|right
-#   zephrctl workspace N                   zephrctl send-to-workspace N
-#   zephrctl toggle-float | monocle | balance | rescue | close
-#   zephrctl group [left|right|up|down]    zephrctl flatten
-#   zephrctl layout [row|column]           (no argument flips it)
-#   zephrctl move-to-display [dir]         zephrctl move-workspace-to-display [dir]
-#   zephrctl summon N                      bring workspace N to this display
-#   zephrctl pause | resume                zephrctl focus-window <id>
-#   zephrctl list-windows | list-workspaces | subscribe
+# Deliberately a transport and nothing else: the command table lives in the
+# app (IPCServer.commands), argument parsing happens there, and `--help`
+# renders the table over the socket rather than keeping a second copy here
+# that drifts out of date.
 #
 # Install: cp tools/zephrctl /usr/local/bin/ && chmod +x /usr/local/bin/zephrctl
 
 SOCK="$HOME/Library/Application Support/Zephr/zephr.sock"
 
-if [ "${1:-}" = "--help" ] || [ -z "${1:-}" ]; then
-    sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'
+if ! command -v perl >/dev/null 2>&1; then
+    echo "zephrctl: needs perl to talk to $SOCK" >&2
+    exit 1
+fi
+
+# Transport: perl, not nc. macOS `nc` quits the moment stdin hits EOF, so it
+# loses a race against any reply the server defers - `doctor` scans off the
+# main actor and answers ~40 ms later, and nc would exit 0 having printed
+# nothing, which looks exactly like a command that worked. perl ships with
+# macOS and IO::Socket::UNIX is core.
+#
+# Exit status follows the reply: an error must fail the command, or
+# `zephrctl … && next-thing` runs the next thing anyway and `set -e` never
+# trips. perl decides it while streaming, because buffering the reply in a
+# command substitution to inspect it would hold `subscribe` back until the
+# server hung up - i.e. forever.
+talk() {
+    printf '%s\n' "$1" | perl -MIO::Socket::UNIX -e '
+        my $path = shift;
+        my $sock = IO::Socket::UNIX->new(Peer => $path, Type => SOCK_STREAM())
+            or die "zephrctl: cannot connect to $path: $!\n";
+        my $request = do { local $/; <STDIN> };
+        print {$sock} $request;
+        # Never shut our write side down: the server reads that as EOF and
+        # drops the connection, taking any pending async reply with it. Read
+        # until the server half-closes instead, which is also what lets
+        # `subscribe` stream indefinitely.
+        $| = 1;
+        my $failed = 0;
+        while (my $line = <$sock>) {
+            print $line;
+            $failed = 1 if $line =~ /"ok":false/;
+        }
+        exit $failed;
+    ' "$SOCK"
+}
+
+usage() {
+    echo "zephrctl - command a running Zephr over its Unix socket."
+    echo
+    echo "Usage: zephrctl <command> [arguments]"
+    echo
+    if [ ! -S "$SOCK" ]; then
+        echo "Zephr is not running, so it cannot list its commands."
+        echo "Start Zephr, or see https://binbandit.github.io/zephr/cli.html"
+        return 0
+    fi
+    echo "Commands:"
+    talk help | perl -MJSON::PP -e '
+        my $table = eval { decode_json(do { local $/; <STDIN> }) };
+        unless (ref $table eq "ARRAY") {
+            print "  (this Zephr predates `help`; see docs/cli.html)\n";
+            exit 0;
+        }
+        for my $c (@$table) {
+            # A long usage line takes the summary underneath rather than
+            # pushing it off the right edge of the terminal.
+            if (length($c->{command}) > 34) {
+                printf "  %s\n%s%s\n", $c->{command}, " " x 39, $c->{summary};
+            } else {
+                printf "  %-36s %s\n", $c->{command}, $c->{summary};
+            }
+        }
+    '
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ -z "${1:-}" ]; then
+    usage
     exit 0
 fi
 
@@ -27,37 +87,29 @@ if [ ! -S "$SOCK" ]; then
     exit 1
 fi
 
-# Transport: perl, not nc. macOS `nc` quits the moment stdin hits EOF, so it
-# loses a race against any reply the server defers — `doctor` scans off the
-# main actor and answers ~40 ms later, and nc would exit 0 having printed
-# nothing, which looks exactly like a command that worked. perl ships with
-# macOS and `IO::Socket::UNIX` is core.
+# One request is one line, so an argument containing a space would otherwise
+# arrive as two. Quote only the arguments that need it: `zephrctl focus left`
+# then puts the same bytes on the wire it always has, and the server's
+# tokenizer unwraps the rest.
 #
-# The client deliberately does NOT shut down its write side: the server reads
-# that as EOF and drops the connection, taking any pending async reply with
-# it. It just writes the request and reads until the server half-closes,
-# which is also what lets `subscribe` stream indefinitely.
-if ! command -v perl >/dev/null 2>&1; then
-    echo "zephrctl: needs perl to talk to $SOCK" >&2
-    exit 1
+# A lone argument is passed through untouched, because it is either a bare
+# verb or a whole request line someone assembled themselves - `zephrctl
+# "$cmd"` is a common enough shape, and no verb has a space in it, so there
+# is nothing to disambiguate.
+if [ "$#" -eq 1 ]; then
+    talk "$1"
+    exit
 fi
 
-# Exit status follows the reply: an error reply must fail the command, or
-# `zephrctl … && next-thing` runs the next thing anyway and `set -e` never
-# trips. The reply is echoed either way.
-reply=$(printf '%s\n' "$*" | perl -MIO::Socket::UNIX -e '
-    my $path = shift;
-    my $sock = IO::Socket::UNIX->new(Peer => $path, Type => SOCK_STREAM())
-        or die "zephrctl: cannot connect to $path: $!\n";
-    my $request = do { local $/; <STDIN> };
-    print {$sock} $request;
-    $| = 1;                 # stream `subscribe` line by line
-    print while <$sock>;
-' "$SOCK")
-status=$?
-[ -n "$reply" ] && printf '%s\n' "$reply"
-[ "$status" -ne 0 ] && exit "$status"
-case "$reply" in
-    *'"ok":false'*) exit 1 ;;
-esac
-exit 0
+tab=$(printf '\t')
+request=
+for arg in "$@"; do
+    case "$arg" in
+        *' '*|*"$tab"*|*'"'*|*'\'*|'')
+            arg="\"$(printf '%s' "$arg" | sed 's/[\\"]/\\&/g')\""
+            ;;
+    esac
+    request="${request:+$request }$arg"
+done
+
+talk "$request"

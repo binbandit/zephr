@@ -171,7 +171,7 @@ private struct PermissionView: View {
             Text("Zephr needs Accessibility access")
                 .font(.title2.weight(.semibold))
 
-            Text("Moving and tiling windows requires the Accessibility permission — that's true of every window manager on macOS. Zephr detects the grant automatically; nothing to restart.")
+            Text("Moving and tiling windows requires the Accessibility permission - that's true of every window manager on macOS. Zephr detects the grant automatically; nothing to restart.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

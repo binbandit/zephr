@@ -129,6 +129,20 @@ actor AppAXConnection {
         return elements
     }
 
+    /// Which of this app's managed windows it lists right now, for the
+    /// paths that cannot wait for the next audit (a tab opening, a tab
+    /// switch). Nil when the app did not answer - see `AuditResult.listed`.
+    func listedWindowIDs() -> Set<WindowID>? {
+        guard !isDegraded else { return nil }
+        let (timedOut, elements) = currentWindowElements()
+        if timedOut {
+            noteTimeout()
+            return nil
+        }
+        let present = Set(elements)
+        return Set(windows.compactMap { present.contains($0.value) ? $0.key : nil })
+    }
+
     func snapshot(_ element: AXElement) -> WindowSnapshot? {
         guard let frame = element.frame else {
             // Distinguish busy from gone (§6.3/§6.4): a timeout feeds the
@@ -393,6 +407,13 @@ actor AppAXConnection {
         /// the window in the model on the very next audit.
         var minimized: [WindowID: Bool] = [:]
         var fullscreen: [WindowID: Bool] = [:]
+        /// Managed windows the app still lists in `kAXWindowsAttribute`, or
+        /// nil when that list could not be read this cycle. macOS drops a
+        /// window from it while the window sits as a *background native tab*
+        /// (§4.3) but keeps the element alive, so a live window missing from
+        /// the list is a tab the user switched away from. `nil` means "no
+        /// information" and must never be read as "none of them are listed".
+        var listed: Set<WindowID>?
     }
 
     func audit() -> AuditResult {
@@ -453,6 +474,8 @@ actor AppAXConnection {
         }
         let known = Set(windows.values)
         result.unknown = elements.filter { !known.contains($0) }
+        let present = Set(elements)
+        result.listed = Set(windows.compactMap { present.contains($0.value) ? $0.key : nil })
         noteSuccess()
         return result
     }

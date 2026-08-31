@@ -37,7 +37,7 @@
 <tr><td><kbd>s</kbd> / <kbd>v</kbd></td><td>Next window splits right / down</td><td>—</td></tr>
 <tr><td><kbd>space</kbd></td><td>Cycle container layout (tiles ↔ accordion)</td><td>—</td></tr>
 <tr><td><kbd>r</kbd></td><td>Resize mode (see below)</td><td><kbd>⌃⌥-</kbd> / <kbd>⌃⌥=</kbd> shrink / grow</td></tr>
-<tr><td><kbd>=</kbd></td><td>Balance sizes in container</td><td>—</td></tr>
+<tr><td><kbd>=</kbd></td><td>Balance - even out every tiled container in the workspace</td><td>—</td></tr>
 <tr><td><kbd>p</kbd></td><td>Open the palette</td><td><kbd>⌃⌥P</kbd></td></tr>
 <tr><td><kbd>q</kbd></td><td>Close focused window</td><td><kbd>⌃⌥Q</kbd></td></tr>
 <tr><td><kbd>w</kbd></td><td>Rescue all windows to current workspace</td><td>—</td></tr>
@@ -61,7 +61,8 @@
 <tr><td><kbd>⇧</kbd> + any of those</td><td>Fine steps (1%)</td></tr>
 <tr><td><kbd>esc</kbd> or <kbd>r</kbd></td><td>Back to the layer</td></tr>
 </table></div>
-<p>The direction is where the window's far edge goes: right and down grow it, left and up shrink it. That holds wherever the window sits &mdash; a tile at the end of a row grows by taking from the neighbour behind it rather than reversing on you.</p>
+<p>The direction is where the window's far edge goes: right and down grow it, left and up shrink it. That holds wherever the window sits - a tile at the end of a row grows by taking from the neighbour behind it rather than reversing on you. If neither neighbour has room left, the key does nothing rather than doing the opposite.</p>
+<p>The <kbd>⌃⌥-</kbd> / <kbd>⌃⌥=</kbd> chords are a slightly different tool: they shrink or grow the focused window's share of its own container and spread the difference across <em>all</em> its siblings, so they work without picking an axis.</p>
 
 <h2 id="presets"><a class="anchor" href="#presets">Chord presets</a></h2>
 <p>The chord modifier is a preset — set <code>preset</code> under <code>[keys]</code> or pick it in Settings. The leader layer is identical in all of them.</p>
@@ -80,9 +81,25 @@
 <tr><td><code>[keys] layer-timeout = 5</code></td><td>Close a forgotten layer after N seconds (default 0 = never)</td></tr>
 </table></div>
 
-<div class="note"><strong>Secure Input:</strong> when a password field or security tool holds the keyboard, macOS mutes event taps. Zephr shows a menu-bar warning and automatically falls back to system hotkeys for the ⌃⌥ chords; the leader layer resumes when Secure Input ends.</div>
+<h2 id="bind"><a class="anchor" href="#bind">Binding your own keys</a></h2>
+<p>A <code>[[bind]]</code> block binds any key to any command. The command names are the same vocabulary <a href="cli.html">zephrctl</a> speaks, so anything you can run from the shell you can put on a key.</p>
+<pre><code>[[bind]]
+key = "ctrl-alt-b"      # a chord
+command = "balance"
 
-<div class="note"><strong>Key positions, not letters:</strong> bindings are by physical key position (ANSI). On Dvorak/Colemak the direction keys sit where QWERTY's h j k l are. Full rebinding arrives with the settings engine.</div>
+[[bind]]
+key = "leader z"        # a bare key, only while the layer is open
+command = "summon 2"    # bring workspace 2 to this display
+
+[[bind]]
+key = "leader shift-o"
+command = "layout column"</code></pre>
+<p>Trigger syntax: a chord is <code>ctrl</code>/<code>alt</code>/<code>cmd</code>/<code>shift</code> joined with dashes and ending in a key (<code>a</code>–<code>z</code>, <code>0</code>–<code>9</code>, <code>space</code>, <code>tab</code>, <code>grave</code>), and needs at least one of ctrl/alt/cmd - a bare letter bound globally would swallow that key in every app. A layer binding is <code>leader &lt;key&gt;</code> or <code>leader shift-&lt;key&gt;</code>.</p>
+<p>Your bindings are checked before the built-in tables, so binding <code>ctrl-alt-h</code> replaces focus-left. There is no way to <em>unbind</em> a built-in key and have it pass through to the app underneath; you can only point it somewhere else. A binding Zephr can't understand is reported in the menu bar and skipped, and the rest of the file still loads.</p>
+
+<div class="note"><strong>Secure Input:</strong> when a password field or security tool holds the keyboard, macOS mutes event taps. Zephr shows a menu-bar warning and falls back to system hotkeys for the built-in chords - focus, move, workspaces, float, monocle, close, palette, shrink/grow and next-display. Two things do not survive the fallback: <kbd>⌃⌥⇧`</kbd> (send window to display) and your own <code>[[bind]]</code> chords. The leader layer resumes when Secure Input ends.</div>
+
+<div class="note"><strong>Key positions, not letters:</strong> bindings are by physical key position (ANSI). On Dvorak/Colemak the direction keys sit where QWERTY's h j k l are, and a <code>[[bind]]</code> key name means that same position.</div>
 
 </main>
 <footer>Zephr · <a href="https://github.com/binbandit/zephr">Source on GitHub</a></footer>

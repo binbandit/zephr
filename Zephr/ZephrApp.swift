@@ -46,7 +46,7 @@ private struct MenuContent: View {
             Divider()
         }
         if appState.secureInputActive {
-            Text("⚠︎ Secure Input is active — hotkeys limited")
+            Text("⚠︎ Secure Input is active - hotkeys limited")
             Divider()
         }
         if let error = appState.configError {

@@ -57,7 +57,7 @@ public enum AeroSpaceImport {
             // line didn't parse cleanly — importing it would write a rule
             // that can never match (§4.7: the report stays honest).
             guard !app.contains("\""), !app.contains("'"), !app.contains(where: \.isWhitespace) else {
-                result.skipped.append("if.app-id \(app) does not look like a bundle id — fix the AeroSpace config and re-import")
+                result.skipped.append("if.app-id \(app) does not look like a bundle id - fix the AeroSpace config and re-import")
                 return
             }
             let runs = rule.runs.joined(separator: "; ")
@@ -69,7 +69,7 @@ public enum AeroSpaceImport {
                 result.rules.append(WindowRule(bundleID: app, titlePattern: title, action: .tile))
                 result.imported.append("tile \(app)")
             } else if runs.contains("move-node-to-workspace") {
-                result.skipped.append("\(app): move-to-workspace rules (config support lands with the P4 settings engine — use Zephr's ⇧1–9 for now)")
+                result.skipped.append("\(app): move-to-workspace rules (config support lands with the P4 settings engine - use Zephr's ⇧1–9 for now)")
             } else if runs.isEmpty {
                 result.skipped.append("\(app): rule had no run command")
             } else {
@@ -158,7 +158,7 @@ public enum AeroSpaceImport {
         flushWindowRule()
 
         if bindingCount > 0 {
-            result.skipped.append("\(bindingCount) keybindings — Zephr ships its own scheme; set `preset = \"aerospace\"` in [keys] for ⌥-style chords")
+            result.skipped.append("\(bindingCount) keybindings - Zephr ships its own scheme; set `preset = \"aerospace\"` in [keys] for ⌥-style chords")
         }
         return result
     }

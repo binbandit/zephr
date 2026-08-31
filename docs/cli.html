@@ -27,6 +27,9 @@
 # or by hand:
 cp tools/zephrctl /usr/local/bin/ && chmod +x /usr/local/bin/zephrctl</code></pre>
 <p>The socket lives at <code>~/Library/Application Support/Zephr/zephr.sock</code> while Zephr runs. Protocol: one command per line in, one JSON reply per line out — trivially scriptable without the wrapper too.</p>
+<p><code>zephrctl --help</code> asks the running app for its command table, so it cannot list a command Zephr does not accept, or miss one it does.</p>
+<div class="note"><strong>Reply shapes:</strong> an action answers <code>{"ok":true}</code> or <code>{"ok":false,"error":"…"}</code>; a query answers a bare JSON array, or a bare number with <code>--count</code>. <code>zephrctl</code> exits non-zero whenever the reply carries <code>"ok":false</code>, so <code>zephrctl … &amp;&amp; next-thing</code> behaves.</div>
+<p>A request is one line and its arguments split on spaces, so a value containing a space has to be quoted. <code>zephrctl</code> quotes what it forwards for you; driving the socket by hand, write <code>list-windows --app "com.example.My App"</code>, where a backslash escapes the next character inside the quotes.</p>
 
 <h2 id="commands"><a class="anchor" href="#commands">Commands</a></h2>
 <div class="tablewrap"><table>
@@ -53,15 +56,45 @@ cp tools/zephrctl /usr/local/bin/ && chmod +x /usr/local/bin/zephrctl</code></pr
 <tr><td><code>rescue</code></td><td>Bring every window to the current workspace</td></tr>
 <tr><td><code>pause</code> / <code>resume</code></td><td>Release / retake windows and the keyboard</td></tr>
 <tr><td><code>focus-window &lt;id&gt;</code></td><td>Focus a window by id (from list-windows)</td></tr>
-<tr><td><code>list-windows</code></td><td>JSON: id, app, title, workspace per managed window</td></tr>
-<tr><td><code>list-workspaces</code></td><td>JSON: id, name, window count, focused flag</td></tr>
+<tr><td><code>list-windows [filters]</code></td><td>JSON per managed window: id, app (bundle id), app-name, title, workspace. <a href="#query">Filters below</a></td></tr>
+<tr><td><code>list-workspaces [--count]</code></td><td>JSON per workspace: id, name, windows, display, visible, focused</td></tr>
+<tr><td><code>list-displays [--count]</code></td><td>JSON per display: id, frame as [x, y, width, height], workspace, focused, paused</td></tr>
+<tr><td><code>list-apps [--count]</code></td><td>JSON per managed app: app (bundle id), app-name, pid, windows</td></tr>
 <tr><td><code>doctor</code></td><td>JSON health checks (permission, Stage Manager, rivals…)</td></tr>
+<tr><td><code>version</code></td><td>App version, build, and <a href="#version">protocol version</a></td></tr>
+<tr><td><code>help</code></td><td>The command table as JSON: what <code>zephrctl --help</code> renders</td></tr>
 <tr><td><code>subscribe</code></td><td>Stream events until disconnected (below)</td></tr>
 </table></div>
 
+<h2 id="query"><a class="anchor" href="#query">Filtering and counting</a></h2>
+<p><code>list-windows</code> takes filters, and every list command takes <code>--count</code>. Both exist for the same reason: a status bar re-runs these several times a second, and the answer it usually wants is a single number. Asking the app for it costs one round trip rather than a round trip plus a <code>jq</code>.</p>
+<div class="tablewrap"><table>
+<tr><th>Flag</th><th>Effect</th></tr>
+<tr><td><code>--focused</code></td><td>Only the focused window</td></tr>
+<tr><td><code>--workspace N</code></td><td>Only windows on workspace N</td></tr>
+<tr><td><code>--display ID</code></td><td>Only windows on that display, by the id <code>list-displays</code> reports</td></tr>
+<tr><td><code>--app BUNDLE_ID</code></td><td>Only that app's windows, matched case-insensitively on the bundle id</td></tr>
+<tr><td><code>--count</code></td><td>Reply with the number of matches instead of the array</td></tr>
+</table></div>
+<pre><code>$ zephrctl list-windows --count
+5
+$ zephrctl list-windows --workspace 3 --count
+2
+$ zephrctl list-apps
+[{"app":"com.google.Chrome","app-name":"Google Chrome","pid":37693,"windows":1},
+ {"app":"com.mitchellh.ghostty","app-name":"Ghostty","pid":3207,"windows":2}]</code></pre>
+<p>Filters combine, and an unknown flag is an error rather than a filter that silently did nothing. <code>list-apps</code> aggregates exactly the windows <code>list-windows</code> reports, so the two can never disagree.</p>
+<div class="note"><strong>Which windows count:</strong> <code>list-windows</code> and <code>list-apps</code> cover the windows you can switch to, including ones parked on another Space or in native fullscreen. A minimized window, or one belonging to an app hidden with ⌘H, is in neither. The <code>windows</code> total in <code>list-workspaces</code> is narrower still: it counts what that workspace is laying out right now, so a window waiting on another Space is absent there while <code>list-windows</code> still reports it, with the workspace it will come back to.</div>
+
+<h2 id="version"><a class="anchor" href="#version">Version and protocol</a></h2>
+<pre><code>$ zephrctl version
+{"ok":true,"version":"0.1","build":"1","protocol":1}</code></pre>
+<p><code>protocol</code> is the version of the wire format, not of Zephr. It rises only when a documented field changes meaning or disappears; new commands and new fields are additive and leave it alone. A script that parses these schemas should check it once and decline to guess at a number it has not been taught. Subscribers get the same number on the hello line, so a long-lived stream never needs a second connection to ask.</p>
+
 <h2 id="subscribe"><a class="anchor" href="#subscribe">The event stream</a></h2>
 <p><code>zephrctl subscribe</code> keeps the connection open and emits one JSON object per line:</p>
-<pre><code>{"event":"workspace_changed","workspace":"3"}
+<pre><code>{"ok":true,"subscribed":true,"protocol":1}
+{"event":"workspace_changed","workspace":"3"}
 {"event":"focus_changed","app":"com.googlecode.iterm2","title":"zsh","window":"12885"}
 {"event":"window_managed","app":"com.apple.Safari","title":"…","window":"30065"}
 {"event":"window_unmanaged","app":"com.apple.Safari","window":"30065"}
@@ -78,9 +111,23 @@ done &amp;</code></pre>
 on-workspace-changed = ["sketchybar --trigger ws_change WS=$ZEPHR_WORKSPACE"]</code></pre>
 
 <h2 id="examples"><a class="anchor" href="#examples">Recipes</a></h2>
-<pre><code># Jump straight to whatever Safari window is anywhere
-zephrctl list-windows | jq -r '.[] | select(.app=="Safari") | .id' \
-  | head -1 | xargs zephrctl focus-window
+<pre><code># A window count for a status bar, with no jq in the loop
+zephrctl list-windows --count
+
+# The focused window's title
+zephrctl list-windows --focused | jq -r '.[0].title // "-"'
+
+# Jump straight to whatever Safari window is anywhere
+id=$(zephrctl list-windows --app com.apple.Safari | jq -r '.[0].id // empty')
+[ -n "$id" ] && zephrctl focus-window "$id"
+
+# How busy is each display?
+zephrctl list-displays | jq -r '.[].id' | while read -r d; do
+  printf '%s: %s windows\n' "$d" "$(zephrctl list-windows --display "$d" --count)"
+done
+
+# Refuse to run against a wire format this script has not been taught
+[ "$(zephrctl version | jq .protocol)" = 1 ] || { echo "unknown zephrctl protocol" >&amp;2; exit 1; }
 
 # Pause tiling while a screen-share app runs
 zephrctl pause; open -W /Applications/zoom.us.app; zephrctl resume

@@ -268,12 +268,18 @@ final class TilingEngine {
                 if !idle || tick % 10 == 0 {
                     self.audit()
                 }
-                // Backstop for a missed Space notification. The deep sweep
-                // only, so an idle desktop still costs one window-list read
+                // Cheap enough for every tick: a `runningApplications`
+                // filter that touches AX only when it finds an app nobody
+                // attached to. It used to share the 30 s sweep below, which
+                // meant an instance that came up while the previous one was
+                // still exiting - an in-place upgrade - managed nothing at
+                // all for half a minute.
+                self.attachNewApps()
+                // Backstop for a missed Space notification. Kept to the deep
+                // sweep, so an idle desktop still costs one window-list read
                 // every ~30 s.
                 if tick % 10 == 0 {
                     self.reconcileSpaces()
-                    self.attachNewApps()
                 }
             }
         }
@@ -306,7 +312,7 @@ final class TilingEngine {
     /// per-element timeouts; recovery must never be the thing that freezes
     /// the launch it is recovering (invariant 1 without breaking 3).
     private func recoverFromCrash(_ saved: StateStore.Snapshot) {
-        Self.log.warning("unclean shutdown detected — recovering windows (§6.6)")
+        Self.log.warning("unclean shutdown detected - recovering windows (§6.6)")
 
         for record in saved.hiddenApps ?? [] {
             if let app = NSRunningApplication(processIdentifier: record.pid),
@@ -652,8 +658,18 @@ final class TilingEngine {
         if snap.minimized { windows[id]?.withdrawnFor.insert(.minimized) }
         hub.watchWindow(pid: pid, element: element, id: id)
 
+        // A new native tab replaces the tab it was opened from (§4.3). Ask
+        // before touching the model, so the insert below and the withdrawal
+        // of the replaced tab happen in the same main-actor turn and the
+        // coalesced `applyAll` solves the layout exactly once - otherwise the
+        // window visibly flashes at half its width before settling back.
+        let listedAfterAdoption = snap.minimized ? nil : await conn.listedWindowIDs()
+
         if !snap.minimized {
             model.insertWindow(id, workspace: workspaceID, floating: floats, frame: snap.frame)
+            if let listedAfterAdoption {
+                reconcileTabs(pid: pid, listed: listedAfterAdoption)
+            }
             applyAll()
         }
         appState.managedWindowCount = windows.count
@@ -672,10 +688,36 @@ final class TilingEngine {
             guard let element, let conn = connections[pid] else { return }
             Task {
                 if let id = await conn.id(for: element) { self.noteFocused(id) }
+                // Switching native tabs creates and destroys nothing, so this
+                // is the only event it raises: the tab switched away from
+                // silently leaves the app's window list (§4.3).
+                if let listed = await conn.listedWindowIDs() {
+                    self.reconcileTabs(pid: pid, listed: listed)
+                }
             }
 
         case .windowDestroyed(let id):
-            removeWindow(id)
+            // Closing a native tab promotes a sibling tab to visible (§4.3),
+            // and that sibling is currently withdrawn. Ask the app what it
+            // lists *before* dropping the dead tab, so the removal and the
+            // sibling's return happen in one main-actor turn and the
+            // coalesced `applyAll` solves once. Removing first and
+            // reconciling afterwards is what the user sees as a flicker on
+            // tab close: the workspace re-solves a tile short, then again
+            // once the audit puts the sibling back up to 3 s later.
+            guard let pid = windows[id]?.pid, let conn = connections[pid],
+                  windows.values.contains(where: {
+                      $0.pid == pid && $0.withdrawnFor.contains(.backgroundTab)
+                  })
+            else {
+                removeWindow(id)
+                return
+            }
+            Task {
+                let listed = await conn.listedWindowIDs()
+                self.removeWindow(id)
+                if let listed { self.reconcileTabs(pid: pid, listed: listed) }
+            }
 
         case .windowMoved(let id), .windowResized(let id):
             handleGeometryEvent(id)
@@ -701,6 +743,7 @@ final class TilingEngine {
         case minimized      // the user minimized this window
         case appHidden      // the user hid the whole app (⌘H)
         case offSpace       // the window is on another native Space
+        case backgroundTab  // a native macOS tab the user switched away from
     }
 
     /// Minimize transitions, shared by the notification handlers and the
@@ -732,6 +775,42 @@ final class TilingEngine {
         windows[id]?.suspendedWorkspace = nil
         model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
         applyAll()
+    }
+
+    /// Native macOS tabs (§4.3). Ghostty, Finder, Safari and Terminal merge
+    /// tabbed windows into one physical window, but every tab remains its own
+    /// AXWindow: opening one fires `windowCreated`, and the tab switched away
+    /// from is never destroyed. Tiling each of them gave a single window three
+    /// slots - the visible tab was squeezed into a fraction of the display and
+    /// the rest of it showed wallpaper.
+    ///
+    /// The readable "tab group" signal §4.3 asks for is the app's own window
+    /// list: macOS drops a background tab from `kAXWindowsAttribute` while
+    /// keeping its element alive, so what the app lists is what is really on
+    /// screen. Anything managed and missing is a tab, and withdrawal is by
+    /// reason and reversible, so selecting that tab again brings its node
+    /// straight back to the workspace it came from.
+    private func reconcileTabs(pid: pid_t, listed: Set<WindowID>) {
+        // Never conclude from a wholesale disappearance. An app that answers
+        // with an empty list is the §6.3 failure mode, not an app whose every
+        // window turned into a background tab - the same call `SpaceMembership`
+        // makes, and for the same reason (invariant 1).
+        guard !listed.isEmpty else { return }
+        var changed = false
+        for (id, mw) in windows where mw.pid == pid {
+            let wasOut = mw.withdrawnFor.contains(.backgroundTab)
+            let isOut = !listed.contains(id)
+            if isOut {
+                withdraw(id, reason: .backgroundTab)
+            } else {
+                restore(id, reason: .backgroundTab)
+            }
+            changed = changed || wasOut != isOut
+        }
+        if changed {
+            let managed = windows.values.count { $0.pid == pid }
+            Self.log.info("tabs reconciled for pid \(pid): \(listed.count) of \(managed) listed")
+        }
     }
 
     /// Debounced follow-up after the user let go of the mouse.
@@ -1961,7 +2040,7 @@ final class TilingEngine {
             mw.vetoStrikes += 1
             windows[id] = mw
             if mw.vetoStrikes >= 2, let ws = model.workspace(containing: id), !ws.isFloating(id) {
-                Self.log.info("window \(id.raw) vetoes frames — auto-floating")
+                Self.log.info("window \(id.raw) vetoes frames - auto-floating")
                 _ = ws.toggleFloat(id, defaultFrame: mw.lastVisibleFrame)
                 windows[id]?.floating = true
                 applyAll()
@@ -2357,6 +2436,11 @@ final class TilingEngine {
         for element in result.unknown {
             Task { await self.adopt(element: element, pid: pid) }
         }
+
+        // Native tabs (§4.3). Safe here without an `unresponsive` guard:
+        // `listed` is only populated by an audit that completed without a
+        // timeout, and is nil otherwise.
+        if let listed = result.listed { reconcileTabs(pid: pid, listed: listed) }
 
         // Missed miniaturize/deminiaturize notifications (§6.4): drive the
         // same transitions as the handlers, or the window stays excluded

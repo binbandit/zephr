@@ -499,7 +499,7 @@ struct DisplayChurnTests {
         m.syncDisplays([d1, d2])
         let assigned = m.activeWorkspaceByDisplay[d2]
         #expect(assigned != nil)
-        #expect((1...9).contains(assigned!), "invented workspace \(assigned!) — no key can reach it")
+        #expect((1...9).contains(assigned!), "invented workspace \(assigned!) - no key can reach it")
         #expect(assigned != m.activeWorkspaceByDisplay[d1])
     }
 

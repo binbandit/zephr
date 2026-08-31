@@ -96,7 +96,7 @@ public enum ConfigFile {
 
     /// Written to `~/.config/zephr/config.toml` on first run.
     public static let defaultText = """
-    # Zephr configuration — ~/.config/zephr/config.toml
+    # Zephr configuration - ~/.config/zephr/config.toml
     # Everything here is optional; these are the defaults. Zephr reloads this
     # file the moment you save it. Errors show in the menu bar, never silently.
 
@@ -120,10 +120,10 @@ public enum ConfigFile {
     # 4 = "chat"
     # float-by-default = [9]      # workspaces where new windows float (junk drawer)
 
-    # Per-app rules — first match wins; checked before Zephr's built-in list.
+    # Per-app rules - first match wins; checked before Zephr's built-in list.
     # [[rules]]
     # app = "com.example.app"     # bundle identifier
-    # title = "^Preferences"      # title regex — case-insensitive, matches anywhere; anchor with ^/$
+    # title = "^Preferences"      # title regex - case-insensitive, matches anywhere; anchor with ^/$
     # action = "float"            # float | tile | ignore | workspace N
 
     # Rebind any key. `command` is the same vocabulary zephrctl speaks, so
@@ -216,7 +216,7 @@ public enum ConfigFile {
                 let typed = rawLine.drop { $0 != "=" }.dropFirst()
                     .trimmingCharacters(in: .whitespaces)
                 let hint = typed.hasPrefix("#")
-                    ? " — `#` starts a comment; quote it as \"\(typed)\""
+                    ? " - `#` starts a comment; quote it as \"\(typed)\""
                     : ""
                 throw ConfigError(line: lineNumber, message: "missing value for `\(key)`\(hint)")
             }
@@ -235,7 +235,7 @@ public enum ConfigFile {
             if let sectionID {
                 let dupKey = "\(sectionID)\u{1}\(key)"
                 if let first = firstLineForKey[dupKey] {
-                    config.warnings.append("line \(lineNumber): `\(key)` was already set on line \(first) — the last value wins")
+                    config.warnings.append("line \(lineNumber): `\(key)` was already set on line \(first) - the last value wins")
                 } else {
                     firstLineForKey[dupKey] = lineNumber
                 }
@@ -255,7 +255,7 @@ public enum ConfigFile {
                         config.leader = binding
                     } else {
                         config.leader = .default
-                        config.warnings.append("line \(lineNumber): \"\(binding.key)\" is not a bindable leader key — use a–z, 0–9, space, tab, or grave; using the default leader \"alt-space\"")
+                        config.warnings.append("line \(lineNumber): \"\(binding.key)\" is not a bindable leader key - use a–z, 0–9, space, tab, or grave; using the default leader \"alt-space\"")
                     }
                 case "dock-icon":
                     config.showDockIcon = try bool(rawValue, line: lineNumber)
@@ -293,19 +293,19 @@ public enum ConfigFile {
                         config.focusBorder.color = color
                     } else {
                         config.focusBorder.color = nil
-                        config.warnings.append("line \(lineNumber): \"\(value)\" is not a color — use \"accent\" or a hex like \"#7AA2F7\" or \"#7AA2F7CC\"; using the accent color")
+                        config.warnings.append("line \(lineNumber): \"\(value)\" is not a color - use \"accent\" or a hex like \"#7AA2F7\" or \"#7AA2F7CC\"; using the accent color")
                     }
                 case "focus-border-width":
                     if let width = optionalNumber(rawValue, range: 0.5...20) {
                         config.focusBorder.width = width
                     } else {
-                        config.warnings.append("line \(lineNumber): `focus-border-width` must be a number from 0.5 to 20, got \(rawValue) — using the default")
+                        config.warnings.append("line \(lineNumber): `focus-border-width` must be a number from 0.5 to 20, got \(rawValue) - using the default")
                     }
                 case "focus-border-radius":
                     if let radius = optionalNumber(rawValue, range: 0...64) {
                         config.focusBorder.cornerRadius = radius
                     } else {
-                        config.warnings.append("line \(lineNumber): `focus-border-radius` must be a number from 0 to 64, got \(rawValue) — matching the system window corners")
+                        config.warnings.append("line \(lineNumber): `focus-border-radius` must be a number from 0 to 64, got \(rawValue) - matching the system window corners")
                     }
                 case "default":
                     let value = try string(rawValue, line: lineNumber)
@@ -324,7 +324,7 @@ public enum ConfigFile {
                     if ["default", "i3", "aerospace", "vim"].contains(value) {
                         config.keyPreset = value
                     } else {
-                        config.warnings.append("line \(lineNumber): unknown key preset \"\(value)\" — using \"default\"")
+                        config.warnings.append("line \(lineNumber): unknown key preset \"\(value)\" - using \"default\"")
                     }
                 case "one-shot":
                     config.layerOneShot = try bool(rawValue, line: lineNumber)
@@ -375,7 +375,7 @@ public enum ConfigFile {
 
         // Never strand the user with no visible surface at all.
         if !config.showMenuBarIcon && !config.showDockIcon {
-            config.warnings.append("menu-bar-icon and dock-icon are both off — reach Zephr via hotkeys, zephrctl, or by editing this file")
+            config.warnings.append("menu-bar-icon and dock-icon are both off - reach Zephr via hotkeys, zephrctl, or by editing this file")
         }
 
         // Key bindings. A binding that cannot be understood is dropped with
@@ -384,23 +384,23 @@ public enum ConfigFile {
         // call is already made for an unbindable leader and a bad rule regex.
         for bind in binds {
             guard let raw = bind.key, !raw.isEmpty else {
-                config.warnings.append("line \(bind.headerLine): [[bind]] needs a `key` — binding skipped")
+                config.warnings.append("line \(bind.headerLine): [[bind]] needs a `key` - binding skipped")
                 continue
             }
             guard let name = bind.command, !name.isEmpty else {
-                config.warnings.append("line \(bind.headerLine): [[bind]] for \(raw) needs a `command` — binding skipped")
+                config.warnings.append("line \(bind.headerLine): [[bind]] for \(raw) needs a `command` - binding skipped")
                 continue
             }
             guard let (trigger, keyName) = KeyBinding.parseTrigger(raw) else {
-                config.warnings.append("line \(bind.headerLine): `\(raw)` is not a key — use \"leader b\" or a chord like \"ctrl-alt-b\" — binding skipped")
+                config.warnings.append("line \(bind.headerLine): `\(raw)` is not a key - use \"leader b\" or a chord like \"ctrl-alt-b\" - binding skipped")
                 continue
             }
             guard LeaderBinding.knownKeyNames.contains(keyName) else {
-                config.warnings.append("line \(bind.headerLine): `\(keyName)` is not a bindable key — binding skipped")
+                config.warnings.append("line \(bind.headerLine): `\(keyName)` is not a bindable key - binding skipped")
                 continue
             }
             guard let command = Command.parse(name) else {
-                config.warnings.append("line \(bind.headerLine): `\(name)` is not a command — binding skipped")
+                config.warnings.append("line \(bind.headerLine): `\(name)` is not a command - binding skipped")
                 continue
             }
             config.bindings.append(KeyBinding(trigger: trigger, key: keyName, command: command))
@@ -420,7 +420,7 @@ public enum ConfigFile {
                     // A rule that can never fire is worse than silence (§4.6),
                     // but one dead rule must not reject the whole file either.
                     // Warn with the line number and drop just this rule.
-                    config.warnings.append("line \(rule.headerLine): title regex \"\(pattern)\" for \(app) does not compile: \((error as NSError).localizedDescription) — rule skipped")
+                    config.warnings.append("line \(rule.headerLine): title regex \"\(pattern)\" for \(app) does not compile: \((error as NSError).localizedDescription) - rule skipped")
                     continue
                 }
             }
@@ -463,7 +463,7 @@ public enum ConfigFile {
         let candidates = knownKeys[section] ?? []
         if let best = candidates.min(by: { editDistance(key, $0) < editDistance(key, $1) }),
            editDistance(key, best) <= max(1, key.count / 3) {
-            return "line \(line): unknown key `\(key)`\(place) — did you mean `\(best)`?"
+            return "line \(line): unknown key `\(key)`\(place) - did you mean `\(best)`?"
         }
         return "line \(line): unknown key `\(key)`\(place)"
     }

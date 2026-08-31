@@ -7,13 +7,17 @@ import ZephrCore
 /// text. Nothing requires it — hotkeys and the palette cover everything —
 /// but it makes SketchyBar integrations and scripting one-liners.
 ///
-/// Protocol: one request per line, one JSON reply per line.
-///   focus left|down|up|right     move left|down|up|right
-///   workspace N                  send-to-workspace N
-///   toggle-float | monocle | balance | rescue
-///   list-windows | list-workspaces
+/// Protocol: one request per line, one JSON reply per line. The verb table
+/// is `commands` below - it is the only description of this surface, and
+/// `zephrctl --help` renders it rather than keeping a copy.
 @MainActor
 final class IPCServer {
+
+    /// Wire-format version, reported by `version`. §4.8 promises stable JSON
+    /// schemas; this is what a script can actually test before trusting
+    /// them. It rises only when a documented field changes meaning or
+    /// disappears - new fields and new verbs are additive and do not bump it.
+    static let protocolVersion = 1
 
     static var socketPath: String {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -219,9 +223,13 @@ final class IPCServer {
             let line = String(decoding: lineData, as: UTF8.self)
                 .trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
-            if line == "subscribe" {
+            let args = Self.tokenize(line)
+            if args.first == "subscribe" {
                 subscribers.insert(fd)
-                send(#"{"ok":true,"subscribed":true}"#, to: fd)
+                // The protocol version rides along on the hello: a long-lived
+                // subscriber can check the schemas it is about to parse
+                // without opening a second connection to ask.
+                send(#"{"ok":true,"subscribed":true,"protocol":\#(Self.protocolVersion)}"#, to: fd)
                 // Replay the current state before any change arrives. A
                 // status bar started at login otherwise renders blank and
                 // stays blank until the user happens to switch workspace,
@@ -238,7 +246,7 @@ final class IPCServer {
             }
             // A nil reply means the command answers asynchronously and will
             // send its own response (see `doctor`).
-            if let reply = handle(line, from: fd) { send(reply, to: fd) }
+            if let reply = handle(args, from: fd) { send(reply, to: fd) }
         }
     }
 
@@ -305,10 +313,84 @@ final class IPCServer {
         for fd in subscribers { send(line, to: fd) }
     }
 
+    /// The whole verb table, served by `help` and rendered by
+    /// `zephrctl --help`. The CLI keeps no list of its own, so this is the
+    /// only place a command can be described - every case `handle` accepts
+    /// belongs here, and one that is missing is a command nobody can find.
+    private static let commands: [(usage: String, summary: String)] = [
+        ("focus left|down|up|right", "Move focus in that direction"),
+        ("move left|down|up|right", "Move the focused window"),
+        ("resize left|down|up|right [--fine]", "Resize by 5% (1% with --fine)"),
+        ("shrink | grow | balance", "Adjust shares in the container"),
+        ("workspace N", "Go to workspace 1-9 (re-request = back-and-forth)"),
+        ("send-to-workspace N", "Send the focused window to workspace N"),
+        ("summon N", "Bring workspace N to the focused display"),
+        ("toggle-float", "Float or re-tile the focused window"),
+        ("float-mode", "Toggle float-by-default on this workspace"),
+        ("monocle", "Toggle monocle on this workspace"),
+        ("cycle-layout", "Tiles <-> accordion"),
+        ("layout [row|column]", "Lay the container out along that axis; no argument flips it"),
+        ("split-h | split-v", "Pre-select the next split's direction"),
+        ("group [left|down|up|right]", "Group the focused window with that neighbour"),
+        ("flatten", "Reparent every window onto the root - the layout reset"),
+        ("close", "Close the focused window"),
+        ("focus-window <id>", "Focus a window by id, from list-windows"),
+        ("next-display", "Focus the next display"),
+        ("move-to-display [dir]", "Send the focused window to that display"),
+        ("move-workspace-to-display [dir]", "Send the whole workspace to that display"),
+        ("toggle-pause-display", "Suspend tiling here only (alias: pause-display, resume-display)"),
+        ("pause | resume", "Release or retake every window and the keyboard"),
+        ("rescue", "Bring every window to the current workspace"),
+        ("list-windows [--focused] [--workspace N] [--display ID] [--app BUNDLE] [--count]",
+         "Managed windows as JSON, or a count with --count"),
+        ("list-workspaces [--count]", "Workspaces as JSON: id, name, windows, display, visible"),
+        ("list-displays [--count]", "Displays as JSON: id, frame, workspace, focused, paused"),
+        ("list-apps [--count]", "Managed apps as JSON: app, app-name, pid, windows"),
+        ("doctor", "Health checks as JSON: title, status, detail"),
+        ("version", "App version, build, and IPC protocol version"),
+        ("subscribe", "Stream events as JSON until disconnected"),
+        ("help", "This table, as JSON"),
+    ]
+
+    /// Splits a request line into arguments. Bare tokens split on spaces the
+    /// way they always have, so `printf 'workspace 3\n' | nc …` keeps
+    /// working, but a double-quoted run is one argument - without that, a
+    /// value containing a space simply could not reach the server. `zephrctl`
+    /// quotes every argument it forwards; inside quotes a backslash escapes
+    /// the next character.
+    private static func tokenize(_ line: String) -> [String] {
+        var args: [String] = []
+        var current = ""
+        var quoted = false
+        var escaped = false
+        // An argument can be legitimately empty (`""`), which is not the same
+        // as the run of spaces between two arguments.
+        var started = false
+        for ch in line {
+            if escaped {
+                current.append(ch)
+                escaped = false
+            } else if quoted, ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                quoted.toggle()
+                started = true
+            } else if !quoted, ch == " " || ch == "\t" {
+                if started { args.append(current) }
+                current = ""
+                started = false
+            } else {
+                current.append(ch)
+                started = true
+            }
+        }
+        if started { args.append(current) }
+        return args
+    }
+
     /// Returns the reply, or nil when the command replies asynchronously.
-    private func handle(_ line: String, from fd: Int32) -> String? {
+    private func handle(_ parts: [String], from fd: Int32) -> String? {
         guard let engine else { return #"{"ok":false,"error":"engine down"}"# }
-        let parts = line.split(separator: " ").map(String.init)
         let ok = #"{"ok":true}"#
 
         func direction(_ s: String?) -> Direction? {
@@ -392,23 +474,17 @@ final class IPCServer {
             guard let raw = parts.dropFirst().first.flatMap(UInt64.init) else { return bad("focus-window needs an id from list-windows") }
             engine.focusManagedWindow(WindowID(raw)); return ok
         case "list-windows":
-            let items = engine.paletteWindows().map {
-                // `workspace` is optional (nil = native fullscreen). Interpolating
-                // it directly emits `Optional(1)` / `nil`, neither of which is
-                // JSON — §4.8 promises stable, parseable schemas.
-                // `id` is a string and `app` a bundle id, matching the
-                // event stream exactly — they used to disagree on both, so
-                // any `jq` join between a subscription and this query
-                // silently matched nothing. `app-name` carries the
-                // localized display name the palette shows.
-                #"{"id":\#(jsonString("\($0.id.raw)")),"app":\#(jsonString($0.bundleID)),"app-name":\#(jsonString($0.app)),"title":\#(jsonString($0.title)),"workspace":\#($0.workspace.map(String.init) ?? "null")}"#
-            }
-            return "[\(items.joined(separator: ","))]"
+            return listWindows(engine, parts.dropFirst())
         case "list-workspaces":
+            guard let count = countOnlyFlag(parts.dropFirst()) else {
+                return bad("list-workspaces takes --count only")
+            }
             // `display` and `visible` are what make a multi-monitor layout
             // debuggable at all: which screen a workspace belongs to, and
             // whether it is the one that screen is currently showing.
-            let items = engine.model.workspaces.values.sorted { $0.id < $1.id }.map { ws -> String in
+            let workspaces = engine.model.workspaces.values.sorted { $0.id < $1.id }
+            if count { return "\(workspaces.count)" }
+            let items = workspaces.map { ws -> String in
                 let display = ws.homeDisplay.map { "\($0.raw)" } ?? ""
                 let visible = ws.homeDisplay.map { engine.model.activeWorkspaceByDisplay[$0] == ws.id } ?? false
                 return #"{"id":\#(ws.id),"name":\#(jsonString(ws.name ?? "")),"windows":\#(ws.allWindows.count),"display":\#(jsonString(display)),"visible":\#(visible),"focused":\#(engine.model.focusedWorkspace?.id == ws.id)}"#
@@ -416,6 +492,10 @@ final class IPCServer {
             return "[\(items.joined(separator: ","))]"
 
         case "list-displays":
+            guard let count = countOnlyFlag(parts.dropFirst()) else {
+                return bad("list-displays takes --count only")
+            }
+            if count { return "\(engine.displays.count)" }
             let focused = engine.model.focusedDisplay
             let items = engine.displays.map { info -> String in
                 let active = engine.model.activeWorkspaceByDisplay[info.id].map(String.init) ?? "null"
@@ -423,9 +503,121 @@ final class IPCServer {
                 return #"{"id":\#(jsonString("\(info.id.raw)")),"frame":[\#(Int(f.minX)),\#(Int(f.minY)),\#(Int(f.width)),\#(Int(f.height))],"workspace":\#(active),"focused":\#(info.id == focused),"paused":\#(engine.isPaused(display: info.id))}"#
             }
             return "[\(items.joined(separator: ","))]"
+
+        case "list-apps":
+            guard let count = countOnlyFlag(parts.dropFirst()) else {
+                return bad("list-apps takes --count only")
+            }
+            // Aggregated from exactly the window set `list-windows` reports,
+            // so a count here and `list-windows --app X --count` can never
+            // disagree - a status bar showing both would look broken.
+            var byBundle: [String: (name: String, pid: pid_t, windows: Int)] = [:]
+            for window in engine.paletteWindows() {
+                if var entry = byBundle[window.bundleID] {
+                    entry.windows += 1
+                    byBundle[window.bundleID] = entry
+                } else {
+                    byBundle[window.bundleID] = (window.app, engine.windows[window.id]?.pid ?? 0, 1)
+                }
+            }
+            if count { return "\(byBundle.count)" }
+            let apps = byBundle.sorted { $0.key < $1.key }.map { bundle, entry in
+                #"{"app":\#(jsonString(bundle)),"app-name":\#(jsonString(entry.name)),"pid":\#(entry.pid),"windows":\#(entry.windows)}"#
+            }
+            return "[\(apps.joined(separator: ","))]"
+
+        case "version":
+            let info = Bundle.main.infoDictionary
+            let short = info?["CFBundleShortVersionString"] as? String ?? "0"
+            let build = info?["CFBundleVersion"] as? String ?? "0"
+            return #"{"ok":true,"version":\#(jsonString(short)),"build":\#(jsonString(build)),"protocol":\#(Self.protocolVersion)}"#
+
+        case "help":
+            let items = Self.commands.map {
+                #"{"command":\#(jsonString($0.usage)),"summary":\#(jsonString($0.summary))}"#
+            }
+            return "[\(items.joined(separator: ","))]"
         default:
             return bad("unknown command; see zephrctl --help")
         }
+    }
+
+    /// `list-windows`, filtered. A status bar re-runs this several times a
+    /// second: answering the narrow question here is the difference between
+    /// one round trip and a round trip plus a `jq` fork per tick.
+    private func listWindows(_ engine: TilingEngine, _ args: ArraySlice<String>) -> String {
+        var onlyFocused = false
+        var count = false
+        var workspace: Int?
+        var display: UInt32?
+        var bundleID: String?
+        var flags = args.makeIterator()
+        while let flag = flags.next() {
+            switch flag {
+            case "--focused": onlyFocused = true
+            case "--count": count = true
+            case "--workspace":
+                guard let value = flags.next(), let n = Int(value) else {
+                    return bad("--workspace needs a number")
+                }
+                workspace = n
+            case "--display":
+                guard let value = flags.next(), let n = UInt32(value) else {
+                    return bad("--display needs an id from list-displays")
+                }
+                display = n
+            case "--app":
+                guard let value = flags.next() else {
+                    return bad("--app needs a bundle id from list-apps")
+                }
+                bundleID = value
+            default:
+                return bad("list-windows: unknown option \(flag)")
+            }
+        }
+
+        let focused = engine.model.focusedWindow
+        let matches = engine.paletteWindows().filter { window in
+            if onlyFocused, window.id != focused { return false }
+            if let workspace, window.workspace != workspace { return false }
+            // Bundle ids are case-insensitively unique on macOS, and no one
+            // types `com.googlecode.iterm2` from memory with the capitals right.
+            if let bundleID, window.bundleID.caseInsensitiveCompare(bundleID) != .orderedSame { return false }
+            if let display {
+                // A window's display is its workspace's home. One that has no
+                // workspace (native fullscreen, or parked on another Space)
+                // has no display either, so it never matches.
+                let home = window.workspace.flatMap { engine.model.workspaces[$0]?.homeDisplay }
+                if home?.raw != display { return false }
+            }
+            return true
+        }
+        if count { return "\(matches.count)" }
+
+        let items = matches.map {
+            // `workspace` is optional (nil = native fullscreen). Interpolating
+            // it directly emits `Optional(1)` / `nil`, neither of which is
+            // JSON — §4.8 promises stable, parseable schemas.
+            // `id` is a string and `app` a bundle id, matching the
+            // event stream exactly — they used to disagree on both, so
+            // any `jq` join between a subscription and this query
+            // silently matched nothing. `app-name` carries the
+            // localized display name the palette shows.
+            #"{"id":\#(jsonString("\($0.id.raw)")),"app":\#(jsonString($0.bundleID)),"app-name":\#(jsonString($0.app)),"title":\#(jsonString($0.title)),"workspace":\#($0.workspace.map(String.init) ?? "null")}"#
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
+
+    /// `--count` is the only flag the unfiltered list verbs take. Returns nil
+    /// on anything else, so a typo is an error rather than a filter that
+    /// silently did nothing.
+    private func countOnlyFlag(_ args: ArraySlice<String>) -> Bool? {
+        var count = false
+        for arg in args {
+            guard arg == "--count" else { return nil }
+            count = true
+        }
+        return count
     }
 
     private func bad(_ message: String) -> String {

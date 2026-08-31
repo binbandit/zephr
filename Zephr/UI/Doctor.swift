@@ -74,7 +74,7 @@ final class DoctorController {
             status: trusted ? .pass : .fail,
             title: "Accessibility permission",
             detail: trusted
-                ? "Granted — window control is active."
+                ? "Granted - window control is active."
                 : "Not granted. Zephr cannot move windows without it.",
             actionLabel: trusted ? nil : "Open System Settings",
             action: trusted ? nil : { delegate.permissionGate.presentIfNeeded() }
@@ -85,8 +85,8 @@ final class DoctorController {
             status: secure ? .warn : .pass,
             title: "Secure Input",
             detail: secure
-                ? "Active — a password field or security tool is holding keyboard events; hotkeys resume when it ends."
-                : "Inactive — hotkeys fully available."
+                ? "Active - a password field or security tool is holding keyboard events; hotkeys resume when it ends."
+                : "Inactive - hotkeys fully available."
         ))
 
         let stage = Self.stageManagerEnabled()
@@ -94,7 +94,7 @@ final class DoctorController {
             status: stage ? .fail : .pass,
             title: "Stage Manager",
             detail: stage
-                ? "Enabled. Stage Manager rearranges windows on its own and is incompatible with tiling — turn it off in Desktop & Dock."
+                ? "Enabled. Stage Manager rearranges windows on its own and is incompatible with tiling - turn it off in Desktop & Dock."
                 : "Off.",
             actionLabel: stage ? "Open Desktop & Dock" : nil,
             action: stage ? {
@@ -108,11 +108,11 @@ final class DoctorController {
         var rivalParts: [String] = []
         if !rivals.fighting.isEmpty {
             rivalStatus = .fail
-            rivalParts.append("\(rivals.fighting.joined(separator: ", ")) running — another tiling manager; two will fight over every window. Quit it before tiling with Zephr.")
+            rivalParts.append("\(rivals.fighting.joined(separator: ", ")) running - another tiling manager; two will fight over every window. Quit it before tiling with Zephr.")
         }
         if !rivals.snapping.isEmpty {
             if rivalStatus == .pass { rivalStatus = .warn }
-            rivalParts.append("\(rivals.snapping.joined(separator: ", ")) running — a snapping utility that only acts on its own shortcuts. It coexists with Zephr; just mind overlapping hotkeys.")
+            rivalParts.append("\(rivals.snapping.joined(separator: ", ")) running - a snapping utility that only acts on its own shortcuts. It coexists with Zephr; just mind overlapping hotkeys.")
         }
         checks.append(Check(
             status: rivalStatus,
@@ -129,13 +129,33 @@ final class DoctorController {
             action: { delegate.configService.openInEditor() }
         ))
 
-        let windowCount = delegate.appState.managedWindowCount
+        // A raw tracked count reads as wrong whenever anything is held out of
+        // the layout: a window on another Space or a background native tab is
+        // still managed, so the number exceeds what the user can see and the
+        // difference is exactly what they came to Doctor to understand.
+        let tracked = delegate.engine.windows.values
+        let held = tracked.filter { !$0.withdrawnFor.isEmpty }
+        let laidOut = tracked.count - held.count
         let displayCount = NSScreen.screens.count
-        checks.append(Check(
-            status: .pass,
-            title: "Engine",
-            detail: "\(windowCount) \(windowCount == 1 ? "window" : "windows") managed across \(displayCount) \(displayCount == 1 ? "display" : "displays")."
-        ))
+        var engineDetail = "\(laidOut) \(laidOut == 1 ? "window" : "windows") tiled across "
+            + "\(displayCount) \(displayCount == 1 ? "display" : "displays")."
+        if !held.isEmpty {
+            var byReason: [(String, Int)] = []
+            for (reason, label) in [
+                (TilingEngine.WithdrawReason.offSpace, "on another Space"),
+                (.minimized, "minimized"),
+                (.appHidden, "hidden with ⌘H"),
+                (.backgroundTab, "a background tab"),
+            ] {
+                let count = held.count { $0.withdrawnFor.contains(reason) }
+                if count > 0 { byReason.append((label, count)) }
+            }
+            // A window can be held out for more than one reason at once, so
+            // these are stated per reason rather than summed.
+            let parts = byReason.map { "\($0.1) \($0.0)" }.joined(separator: ", ")
+            engineDetail += " \(held.count) held out of the layout: \(parts)."
+        }
+        checks.append(Check(status: .pass, title: "Engine", detail: engineDetail))
 
         return checks
     }

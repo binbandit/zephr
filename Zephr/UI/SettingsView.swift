@@ -219,7 +219,7 @@ private struct GeneralSettings: View {
             }) {
                 Text("Default (⌃⌥ chords)").tag("default")
                 Text("i3 (⌘⌥ chords)").tag("i3")
-                Text("AeroSpace (bare ⌥ — breaks ⌥-typing)").tag("aerospace")
+                Text("AeroSpace (bare ⌥ - breaks ⌥-typing)").tag("aerospace")
                 Text("Vim (leader only, no chords)").tag("vim")
             }
 

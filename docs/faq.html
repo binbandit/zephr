@@ -20,7 +20,7 @@
 <main>
 
 <h1>FAQ & troubleshooting</h1>
-<p class="lead">Start with the built-in doctor: menu bar → <em>Run Doctor…</em> (or <code>zephrctl doctor</code>). It checks everything on this page and offers one-click fixes.</p>
+<p class="lead">Start with the built-in doctor: menu bar → <em>Run Doctor…</em> (or <code>zephrctl doctor</code>). It checks the Accessibility grant, Secure Input, Stage Manager, rival window managers, and your config file, and offers one-click fixes for what it finds.</p>
 
 <h2 id="permissions"><a class="anchor" href="#permissions">I granted Accessibility but Zephr keeps asking / nothing tiles</a></h2>
 <p>macOS binds the Accessibility grant to the app's <em>code signature</em>. After an update or a rebuild with a different signature, System Settings still shows the old checkmark — but the running app is refused. This is the single most common issue with every window manager.</p>
@@ -30,17 +30,18 @@
 
 <h2 id="keys-dead"><a class="anchor" href="#keys-dead">My hotkeys stopped working</a></h2>
 <ol>
-  <li><strong>Secure Input?</strong> A password field or security tool is holding the keyboard — the menu bar shows a warning. The ⌃⌥ chords automatically fall back to system hotkeys; the leader layer resumes when Secure Input ends. Common holders: password prompts left open, some VPNs and password managers.</li>
+  <li><strong>Secure Input?</strong> A password field or security tool is holding the keyboard - the menu bar shows a warning. The built-in chords automatically fall back to system hotkeys; the leader layer, <kbd>⌃⌥⇧`</kbd>, and your own <code>[[bind]]</code> chords do not, and resume when Secure Input ends. Common holders: password prompts left open, some VPNs and password managers.</li>
   <li><strong>Paused?</strong> The menu-bar item shows ⏸ while paused — Zephr releases the keyboard entirely by design. Menu bar → Resume.</li>
   <li><strong>Permission stale?</strong> See <a href="#permissions">above</a> — a dead event tap and a refused permission are the same disease. Zephr retries tap creation automatically for 30 seconds after a grant.</li>
 </ol>
 
 <h2 id="not-tiling"><a class="anchor" href="#not-tiling">A window won't tile / tiles when it shouldn't</a></h2>
 <ul>
-  <li>Dialogs, non-resizable windows, modals, and windows under 500×350 float on purpose. <kbd>⌃⌥T</kbd> overrides any single window; a <code>[[rules]]</code> entry with <code>action = "tile"</code> or <code>"float"</code> makes it permanent (Settings → Rules can write it for you).</li>
-  <li>Apps that <em>refuse</em> the frames Zephr sets (fixed-size windows) are floated automatically after two attempts, and the rule is saved so it's remembered.</li>
-  <li>Native-fullscreen windows are deliberately unmanaged — macOS owns that Space. They're listed in the palette marked ⛶ and re-tile the moment they leave fullscreen.</li>
-  <li>Minimized windows leave the tree and rejoin when restored.</li>
+  <li>Dialogs, non-resizable windows, modals, and windows both under 500&nbsp;pt wide and under 350&nbsp;pt tall float on purpose. <kbd>⌃⌥T</kbd> overrides any single window; a <code>[[rules]]</code> entry with <code>action = "tile"</code> or <code>"float"</code> makes it permanent (Settings → Rules can write it for you).</li>
+  <li>Anything sitting above the normal window layer - screen-share bars, screenshot overlays, reminder popups, picture-in-picture - is never managed, however standard it looks to the Accessibility API. If a real window is being skipped this way, file an issue: the layer is matched by position and size, and an ambiguous match is deliberately treated as "no answer" rather than a guess.</li>
+  <li>An app that will not shrink past a certain size is <em>believed</em>: Zephr records the minimum and the layout stops asking for anything smaller. It is not floated for it. Only an app that refuses the frames outright - same size back, or a window that will not move - gets floated, after two attempts, and then the rule is saved so it's remembered.</li>
+  <li>Native-fullscreen windows are deliberately unmanaged - macOS owns that Space. They're listed in the palette marked ⛶ and re-tile the moment they leave fullscreen. The focus border stops drawing over a display a fullscreen window has taken.</li>
+  <li>Minimized windows, windows of an app you hid with <kbd>⌘H</kbd>, and windows you dragged to another Space all leave the tree and rejoin when they come back.</li>
 </ul>
 
 <h2 id="lost"><a class="anchor" href="#lost">I can't find a window</a></h2>
@@ -58,12 +59,13 @@
 <h2 id="spaces"><a class="anchor" href="#spaces">Why virtual workspaces instead of macOS Spaces?</a></h2>
 <p>Apple provides no public API to create, switch, or move windows between Spaces — tools that control Spaces do it by disabling SIP, which Zephr will never ask for. Zephr's workspaces are its own, engineered to be seamless: computed off-screen stashing that adapts to any monitor arrangement, app-hiding so Mission Control stays clean, and a hard never-lose-a-window guarantee.</p>
 <p>Windows on your other native Spaces are left alone. Zephr notices when a window moves to another Space and drops it out of the layout until it comes back, so its tile closes instead of holding room for something you cannot see. It works this out from the public window list, never from window titles &mdash; reading those would require the Screen Recording permission, and Zephr will not ask for one it does not need.</p>
+<p>Because that list carries no window identity Zephr is allowed to read, the match is made on owning process and window bounds, and it is deliberately cautious. If <em>every</em> managed window vanishes at once, that is a Space switch, not a migration, and nothing is withdrawn - tearing out the whole layout and rebuilding it on the way back would not give you the same tree. Withdrawal only happens when some windows of an app left while others stayed, which is what dragging one window to another Space actually looks like. Windows withdrawn this way still appear in the palette, with the workspace they came from.</p>
 
 <h2 id="battery"><a class="anchor" href="#battery">Will it drain my battery?</a></h2>
-<p>It's designed not to: event-driven first, with a reconciliation audit that only runs while things are actually happening (a deep sweep every ~30&nbsp;s at idle), coalesced timers, and per-app queues at sensible QoS. The design budget is &lt;0.5% idle CPU (not yet measured in a release lane). If you ever see it misbehave in Activity Monitor, that's a bug — report it.</p>
+<p>It's designed not to: event-driven first, with a reconciliation audit that only runs while things are actually happening (every 3&nbsp;s while you're working, dropping to a deep sweep every ~30&nbsp;s once the desktop has been quiet for ten), coalesced timers, and per-app queues at sensible QoS. The design budget is &lt;0.5% idle CPU. A spot check on an idle desktop showed 0.0%, but the budget has not been measured in a release lane or under load. If you ever see it misbehave in Activity Monitor, that's a bug - report it.</p>
 
 <h2 id="multimon"><a class="anchor" href="#multimon">How does multi-monitor work?</a></h2>
-<p>Each display shows its own workspace (the menu bar reads e.g. <code>3·1</code>). Focus and window-moves cross display edges naturally; <kbd>⌃⌥`</kbd> hops displays. Docking and undocking is the signature feature: layouts are recorded per arrangement and restored exactly — see <a href="guide.html#displays">the guide</a>.</p>
+<p>Each display shows its own workspace (the menu bar reads e.g. <code>3·1</code>). Focus and window-moves cross display edges naturally; <kbd>⌃⌥`</kbd> hops displays, <kbd>⌃⌥⇧`</kbd> takes the focused window along, leader <kbd>d</kbd> sends the whole workspace, and the palette can summon a workspace onto the display you're looking at. Leader <kbd>⇧D</kbd> pauses tiling on one display and leaves the rest alone. Docking and undocking is the signature feature: layouts are recorded per arrangement and restored exactly - see <a href="guide.html#displays">the guide</a>.</p>
 
 <h2 id="electron"><a class="anchor" href="#electron">Electron apps behave oddly</a></h2>
 <p>Chromium/Electron windows misreport geometry unless a specific accessibility flag is toggled around every frame write — Zephr does this automatically. If a specific Electron app still misplaces, add a rule for it and file an issue with the app name.</p>

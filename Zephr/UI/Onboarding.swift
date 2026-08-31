@@ -21,13 +21,13 @@ final class OnboardingController {
 
         var label: String {
             switch self {
-            case .openLayer: "Press the leader key — the command strip appears"
+            case .openLayer: "Press the leader key - the command strip appears"
             case .focusWindow: "Focus another window: leader, then h or l"
             case .moveWindow: "Move a window: ⇧L (or any ⇧-direction)"
             case .switchWorkspace: "Jump to workspace 2: leader, then 2"
             case .sendToWorkspace: "Send a window along: ⇧2"
             case .toggleFloat: "Float the focused window: t"
-            case .openPalette: "Open the palette: p — fuzzy-find anything"
+            case .openPalette: "Open the palette: p - fuzzy-find anything"
             }
         }
     }
@@ -83,7 +83,7 @@ final class OnboardingController {
                         .foregroundStyle(.tint)
                     Text("Practice window \(n)")
                         .font(.title3.weight(.medium))
-                    Text("Try the tutorial steps on me — I'm disposable.")
+                    Text("Try the tutorial steps on me - I'm disposable.")
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -279,7 +279,7 @@ private struct OnboardingView: View {
                 .font(.system(size: 44, weight: .light))
                 .foregroundStyle(.tint)
             Text("One permission").font(.title2.weight(.semibold))
-            Text("Moving windows requires Accessibility access — true of every window manager on macOS. Zephr notices the grant instantly; nothing to restart.")
+            Text("Moving windows requires Accessibility access - true of every window manager on macOS. Zephr notices the grant instantly; nothing to restart.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if model.permissionGranted {
@@ -308,10 +308,10 @@ private struct OnboardingView: View {
     private var leader: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Pick your leader key").font(.title2.weight(.semibold))
-            Text("The leader opens Zephr's command layer. Every command also has a direct ⌃⌥ chord — the leader is the on-ramp, not a cage.")
+            Text("The leader opens Zephr's command layer. Every command also has a direct ⌃⌥ chord - the leader is the on-ramp, not a cage.")
                 .foregroundStyle(.secondary)
             if model.raycastDetected {
-                Label("Raycast detected — it often claims ⌥ Space, so ⌃⌥ Space is preselected.", systemImage: "exclamationmark.triangle")
+                Label("Raycast detected - it often claims ⌥ Space, so ⌃⌥ Space is preselected.", systemImage: "exclamationmark.triangle")
                     .font(.callout)
                     .foregroundStyle(.orange)
                     .onAppear {
@@ -326,7 +326,7 @@ private struct OnboardingView: View {
             .pickerStyle(.radioGroup)
             .labelsHidden()
             .accessibilityLabel("Leader key")
-            Text("Change it anytime in ~/.config/zephr/config.toml — Zephr reloads on save.")
+            Text("Change it anytime in ~/.config/zephr/config.toml - Zephr reloads on save.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Spacer()
@@ -370,7 +370,7 @@ private struct OnboardingView: View {
                 .font(.system(size: 44, weight: .light))
                 .foregroundStyle(.green)
             Text("You know 80% of it.").font(.title2.weight(.semibold))
-            Text("Press your leader, then ? — the full cheat sheet is always one keystroke away. Replay this tour from the menu bar anytime.")
+            Text("Press your leader, then ? - the full cheat sheet is always one keystroke away. Replay this tour from the menu bar anytime.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if ImportService.anythingToImport {

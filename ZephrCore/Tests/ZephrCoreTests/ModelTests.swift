@@ -163,7 +163,7 @@ struct RuleTests {
         let matched = rule.matchesTitle(title)
         let elapsed = Date().timeIntervalSince(start)
         #expect(!matched)
-        #expect(elapsed < 2.0, "pathological pattern took \(elapsed)s — the time budget is not working")
+        #expect(elapsed < 2.0, "pathological pattern took \(elapsed)s - the time budget is not working")
         // Sanity: the budget must not break ordinary matching.
         #expect(rule.matchesTitle(String(repeating: "a", count: 40)))
     }

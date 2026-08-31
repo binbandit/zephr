@@ -141,28 +141,115 @@ public struct RuleSet: Sendable {
 
     /// The shipped rules database (§4.3). Curated starter set; grows via
     /// community PRs and ships updates through the normal update channel.
+    ///
+    /// The bar for an entry is that the engine's structural gates get the
+    /// window wrong. Those gates already refuse anything whose role is not
+    /// `AXWindow`, anything whose subrole is neither a standard window nor a
+    /// dialog, and anything the window server places above the ordinary
+    /// window level; they float modal, non-resizable and small windows. A
+    /// rule that only restates one of them never fires and is worse than no
+    /// rule at all, so every entry below records what breaks in its absence.
+    ///
+    /// Title patterns are English-only by nature. That is the safe
+    /// direction: a localized system falls back to the structural gates and
+    /// at worst tiles something it should have floated, which the user can
+    /// undo with one keystroke.
     public static let shippedRules: [WindowRule] = [
-        // Launchers and system chrome are never touched.
+        // Launchers. The search field is a plain `AXWindow`, and so are the
+        // side panels each of these opens - Raycast's Floating Notes and
+        // confetti, Alfred's clipboard history. Ignoring the app covers the
+        // whole family, and a tile where the user expects an overlay is the
+        // most jarring thing a tiling manager can do.
         .init(bundleID: "com.raycast.macos", action: .ignore),
         .init(bundleID: "com.runningwithcrayons.Alfred", action: .ignore),
         .init(bundleID: "com.apple.Spotlight", action: .ignore),
+
+        // Desktop furniture, not content. `com.apple.dock` owns Mission
+        // Control and Launchpad as well as the Dock itself, `WindowManager`
+        // is Stage Manager's strip, and the three menu-bar agents put their
+        // popovers on screen as windows. Managing any of it means fighting
+        // the OS for control of the screen.
         .init(bundleID: "com.apple.dock", action: .ignore),
         .init(bundleID: "com.apple.controlcenter", action: .ignore),
         .init(bundleID: "com.apple.notificationcenterui", action: .ignore),
         .init(bundleID: "com.apple.systemuiserver", action: .ignore),
         .init(bundleID: "com.apple.WindowManager", action: .ignore),
+
+        // The screen saver covers a whole display without ever reporting
+        // native fullscreen. Adopted, it holds a tile for as long as the
+        // saver runs and the layout reflows twice around a window nobody is
+        // looking at.
         .init(bundleID: "com.apple.ScreenSaver.Engine", action: .ignore),
 
-        // Windows that should float.
+        // Zebar is a desktop bar: a menu-bar-only app whose one window is a
+        // full-width strip with no close button, sitting at the *ordinary*
+        // window level where the level gate cannot see it. Tiled, it takes a
+        // whole column and every real window shrinks to make room.
+        .init(bundleID: "com.glzr.zebar", action: .ignore),
+
+        // System Settings is resizable and opens around 720x970, so nothing
+        // structural keeps it out of the tree. It is an errand, not a window
+        // to live in.
         .init(bundleID: "com.apple.systempreferences", action: .float),
+
+        // Activity Monitor's process inspector ("Inspect Process") and its
+        // sampler ("Sample of Safari") are full-size resizable windows. The
+        // main window is titled after the selected tab - CPU, Memory, Energy
+        // - so anchoring at the start leaves it tiling.
         .init(bundleID: "com.apple.ActivityMonitor", titlePattern: "^(Inspect|Sample)", action: .float),
+
+        // Calculator is 198x350, sitting exactly on the boundary of the
+        // small-window heuristic, which needs both dimensions *strictly*
+        // under 500x350. One point of height is all that separates it from
+        // being tiled.
         .init(bundleID: "com.apple.calculator", action: .float),
+
+        // Single-purpose instrument panels: opened to read one value and
+        // closed again. ColorSync Utility's profile browser in particular is
+        // large and resizable, so nothing structural catches it, and tiling
+        // it reflows the workspace twice for a two-second errand.
         .init(bundleID: "com.apple.ColorSyncUtility", action: .float),
         .init(bundleID: "com.apple.DigitalColorMeter", action: .float),
+
+        // Archive Utility's progress window is sized to the file name, so a
+        // long path pushes it past 500 points wide and into a tile for the
+        // length of an unzip - then it vanishes and the layout reflows again.
         .init(bundleID: "com.apple.archiveutility", action: .float),
+
+        // Zoom's screen-share control strip: an ordinary resizable window at
+        // the ordinary level, so only its title marks it out. It appears
+        // mid-call, which is the worst possible moment to reflow a layout.
+        // Zoom titles it a beat after creating it, which is why the engine
+        // re-checks title rules on `kAXTitleChanged`.
         .init(bundleID: "us.zoom.xos", titlePattern: "^zoom floating", action: .float),
+
+        // 1Password's Quick Access panel. Its overlays normally sit above
+        // the ordinary window level, but that gate joins AX to the window
+        // server on frame alone and declines to answer when the match is
+        // ambiguous - and a password panel yanked into a tile is the one
+        // misclassification with a security cost, so it gets a second line
+        // of defence.
         .init(bundleID: "com.1password.1password", titlePattern: "Quick Access", action: .float),
+
+        // Video windows that hold their aspect ratio. They come back from
+        // any tile a different size, so the engine writes a frame the app
+        // refuses, twice, before the frame-veto path floats them anyway -
+        // and that path also persists a learned rule into the user's config
+        // for something we already knew.
         .init(bundleID: "com.apple.FaceTime", action: .float),
+        .init(bundleID: "com.apple.PhotoBooth", action: .float),
+
+        // The Simulator's window is the shape of the device it emulates:
+        // 447x950 for a phone, tall enough to clear the small-window
+        // heuristic. Stretched into a landscape tile the device shrinks to a
+        // sliver of the space it was given.
         .init(bundleID: "com.apple.iphonesimulator", action: .float),
+
+        // qutebrowser with `window.hide_decoration` set reports its ordinary
+        // browser window as `AXDialog`, and the engine floats every dialog:
+        // without this the user's main window never tiles. Its context menus
+        // share that subrole but sit above the ordinary window level, so the
+        // level gate has already dropped them before this is consulted.
+        .init(bundleID: "org.qutebrowser.qutebrowser", action: .tile),
     ]
 }

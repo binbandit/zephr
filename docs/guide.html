@@ -34,7 +34,7 @@
   <li>The menu-bar item shows <strong>◆</strong> while the layer is open — no invisible modes.</li>
   <li>After you've used the same layer command ten times, the strip shows its direct chord once — the layer teaches you the fast path.</li>
 </ul>
-<p>Every frequent command also has a direct <kbd>⌃⌥</kbd> chord that needs no leader. The defaults never bind bare <kbd>⌥</kbd>, so international typing (⌥e → é) and Emacs bindings survive. See the <a href="keys.html">complete keymap</a>.</p>
+<p>Every frequent command also has a direct <kbd>⌃⌥</kbd> chord that needs no leader. The defaults never bind bare <kbd>⌥</kbd>, so international typing (⌥e → é) and Emacs bindings survive. Any key can be pointed somewhere else with a <a href="keys.html#bind"><code>[[bind]]</code></a> block, using the same command names <a href="cli.html">zephrctl</a> takes. See the <a href="keys.html">complete keymap</a>.</p>
 
 <h2 id="workspaces"><a class="anchor" href="#workspaces">Workspaces</a></h2>
 <ul>
@@ -42,7 +42,8 @@
   <li><strong>Back-and-forth:</strong> re-press the workspace you're on to bounce to the previous one.</li>
   <li><strong>Per display:</strong> each monitor shows its own active workspace. <kbd>⌃⌥`</kbd> (or leader <kbd>tab</kbd>) hops focus between displays; moving a window past the last split at a display edge carries it to the neighboring display.</li>
   <li>Name workspaces and make one a floating junk drawer in the <a href="config.html#workspaces">config</a>. Names show in the menu bar and palette.</li>
-  <li>Inactive workspaces stash their windows off-screen and hide fully-stashed apps, so Mission Control stays clean. Leader <kbd>w</kbd> rescues <em>every</em> window to the current workspace if anything ever feels lost.</li>
+  <li>Inactive workspaces stash their windows off-screen and hide fully-stashed apps, so Mission Control stays clean. Windows are stashed into a bottom corner rather than straight down: macOS clamps how far below a display a window may sit, so "one point past the bottom edge" lands tens of points short and leaves a strip of window showing. Leader <kbd>w</kbd> rescues <em>every</em> window to the current workspace if anything ever feels lost.</li>
+  <li><strong>Windows that step out.</strong> Minimizing a window, hiding an app with <kbd>⌘H</kbd>, or dragging a window to another native Space all take it out of the layout so its tile closes instead of holding room for something you can't see. It rejoins the workspace it left when it comes back, though not necessarily the same spot in the tree. The three reasons stack: un-minimizing a window whose app is still hidden does not put it back on screen.</li>
 </ul>
 
 <h2 id="layouts"><a class="anchor" href="#layouts">Layouts, splits, and sizing</a></h2>
@@ -50,15 +51,19 @@
   <li><kbd>s</kbd> / <kbd>v</kbd> pre-select the next split's direction (right / down).</li>
   <li>Leader <kbd>space</kbd> cycles the focused container between <strong>tiles</strong> and <strong>accordion</strong> (non-focused windows collapse to slivers at the edges).</li>
   <li><kbd>m</kbd> toggles <strong>monocle</strong>: the focused window temporarily fills the workspace.</li>
-  <li>Resize: leader <kbd>r</kbd> enters resize mode — <kbd>h j k l</kbd> adjust in 5% steps, <kbd>⇧</kbd> for 1%. Or <kbd>⌃⌥-</kbd> / <kbd>⌃⌥=</kbd> to shrink/grow directly. <kbd>=</kbd> in the layer balances the container.</li>
-  <li>Gaps are 8&nbsp;pt by default and configurable to 0.</li>
+  <li><strong>Building structure by hand:</strong> <kbd>g</kbd> groups the focused window with the next one into a nested container laid out on the other axis; <kbd>o</kbd> flips a group between a row and a column; <kbd>⇧G</kbd> ungroups everything, putting every window back at the top level with an equal share. Without <kbd>g</kbd> the only way to make a nested group is to open a window with a split pre-selected, which means closing and reopening windows to rearrange them.</li>
+  <li>Resize: leader <kbd>r</kbd> enters resize mode - <kbd>h j k l</kbd> adjust in 5% steps, <kbd>⇧</kbd> for 1%. The direction is where the window's far edge goes, so right and down always grow and left and up always shrink, wherever the window sits in the tree. <kbd>⌃⌥-</kbd> / <kbd>⌃⌥=</kbd> shrink and grow the focused window's share of its container directly.</li>
+  <li><kbd>=</kbd> in the layer <strong>balances</strong>: every tiled container in the workspace goes back to even shares, not just the one you're standing in. Accordion containers keep their ratios, since their geometry comes from which child has focus.</li>
+  <li>Gaps are 8&nbsp;pt by default and configurable to 0. The focused window gets an accent outline; its color, width, and corner radius are <a href="config.html">configurable</a>, and it can be turned off.</li>
 </ul>
 
 <h2 id="floating"><a class="anchor" href="#floating">Floating</a></h2>
 <ul>
   <li><kbd>t</kbd> toggles the focused window between tiled and floating. Floats keep their frame and sit above the tiles; move them with the focus-move keys (50&nbsp;pt nudges).</li>
-  <li>Zephr floats the right things automatically: dialogs and sheets, non-resizable windows, windows smaller than 500×350, modals, and a shipped per-app rules list (System Settings, Zoom's floating controls, and friends). Launchers like Raycast and Alfred are ignored entirely.</li>
-  <li>If an app repeatedly refuses the frames Zephr gives it, that window gets floated automatically. Once <em>every</em> window of the app has refused, the rule is written into your config so the fight never happens again on future launches.</li>
+  <li>Zephr floats the right things automatically: dialogs and sheets, non-resizable windows, windows both narrower than 500&nbsp;pt and shorter than 350&nbsp;pt, modals, and a shipped per-app rules list (System Settings, Zoom's floating controls, and friends). Launchers like Raycast and Alfred are ignored entirely.</li>
+  <li><strong>Overlays are not windows.</strong> Screen-share control bars, screenshot overlays, reminder popups, and picture-in-picture panels all describe themselves to macOS as ordinary windows with a close button. Zephr checks the window's layer in the window server and refuses anything sitting above the normal one, so a tile never opens where you see a floating bar.</li>
+  <li><strong>Apps with a minimum size are believed, not fought.</strong> When an app comes back bigger than the frame it was given on one axis and no smaller on the other, that is the app stating a minimum. Zephr records it (per axis, and only after seeing the same reading twice, since a read-back taken right after a write can be stale) and the solver stops asking for anything smaller. That used to look like a refusal to tile, and it floated ordinary editors.</li>
+  <li>An app that genuinely <em>refuses</em> the frames it is given - same size back, or a window that will not move - is floated after two strikes. Once <em>every</em> window of the app has refused, the rule is written into your config so the fight never happens again on future launches.</li>
 </ul>
 
 <h2 id="mouse"><a class="anchor" href="#mouse">Mouse, when you want it</a></h2>
@@ -70,20 +75,28 @@
 <h2 id="palette"><a class="anchor" href="#palette">The palette</a></h2>
 <p><kbd>⌃⌥P</kbd> (or leader <kbd>p</kbd>) opens a Spotlight-style palette that fuzzy-searches:</p>
 <ul>
-  <li><strong>Windows</strong> — app icon, title, workspace badge. Enter focuses it, switching workspace and display as needed. Native-fullscreen windows appear marked ⛶ and are summoned by activating their app.</li>
-  <li><strong>Workspaces</strong> — jump by number or name.</li>
-  <li><strong>Commands</strong> — everything Zephr can do, searchable by name. Forgot a key? Type the command.</li>
+  <li><strong>Windows</strong> - app icon, title, workspace badge. Enter focuses it, switching workspace and display as needed. Native-fullscreen windows appear marked ⛶ and are summoned by activating their app; so are windows you have dragged to another Space.</li>
+  <li><strong>Workspaces</strong> - jump by number or name. With more than one display, "bring workspace <em>n</em> here" is listed too.</li>
+  <li><strong>Commands</strong> - the everyday ones, searchable by name: float, monocle, balance, cycle layout, rescue, next display, close, split, focus and move, workspace float mode, pause. Forgot a key? Type the command. The newer layout and display operations (group, flatten, row ↔ column, send to display, pause this display) are on the keyboard and in <a href="cli.html">zephrctl</a>, but are not in the palette yet.</li>
 </ul>
 
 <h2 id="displays"><a class="anchor" href="#displays">Displays, docking, and sessions</a></h2>
+<p>With more than one display there are four moves you'll want:</p>
+<ul>
+  <li><kbd>tab</kbd> (or <kbd>⌃⌥`</kbd>) - move your focus to the next display.</li>
+  <li><kbd>⇧tab</kbd> (or <kbd>⌃⌥⇧`</kbd>) - take the focused window with you.</li>
+  <li><kbd>d</kbd> - send this whole workspace to the next display, windows and tree intact.</li>
+  <li><strong>Summon</strong> - the opposite of switching: bring a workspace <em>here</em>, to the display you're looking at. <kbd>1</kbd>–<kbd>9</kbd> goes to wherever a workspace already lives and takes your focus with it, which on two displays can feel like it changed the wrong screen. Summon is in the palette, and bindable as <code>summon 3</code>.</li>
+</ul>
 <p>Zephr continuously records a <strong>profile</strong> per display arrangement: which workspace lives on which display, every tree with its split ratios, and every floating frame. Unplug a monitor and workspaces migrate to what's left; plug it back in and everything returns exactly. The same mechanism reassembles your layout after a relaunch or reboot, matching windows by app and title as they reappear.</p>
 <p>Profiles are visible (and deletable) in Settings → Profiles.</p>
 
 <h2 id="pause"><a class="anchor" href="#pause">Pausing</a></h2>
 <p>Menu bar → <em>Pause Zephr</em> (also in the palette, or <code>zephrctl pause</code>). Pausing restores every stashed window, unhides apps, and releases the keyboard completely — Zephr goes fully inert for screen sharing, presentations, or games. Resume re-applies the layout. The menu-bar item shows ⏸ while paused.</p>
+<p>You can also pause <strong>one display</strong>: leader <kbd>⇧D</kbd>, the menu's <em>Pause / Resume This Display Only</em>, or <code>zephrctl pause-display</code>. Zephr stops writing frames on that display while the others keep tiling - for the screen you're presenting from, or the one with the game on it. Anything it had stashed off-screen there is brought back first, so pausing can't strand a window. The keyboard stays Zephr's, and hidden apps stay hidden; only a full pause gives those back.</p>
 
 <h2 id="menubar"><a class="anchor" href="#menubar">The menu bar item</a></h2>
-<p>A quiet glyph plus the current workspace (per display when you have several, e.g. <code>3·1</code>). The menu holds the workspace switcher, rescue, pause, config/tutorial/doctor entry points, launch-at-login, and Settings (<kbd>⌘,</kbd>). You can hide the icon (<code>menu-bar-icon = false</code>) or add a Dock icon (<code>dock-icon = true</code>).</p>
+<p>A quiet glyph plus the current workspace (per display when you have several, e.g. <code>3·1</code>). The menu holds a workspace switcher per display, rescue, balance, pause - whole-app and this-display-only - config/tutorial/doctor entry points, launch-at-login, and Settings (<kbd>⌘,</kbd>). You can hide the icon (<code>menu-bar-icon = false</code>) or add a Dock icon (<code>dock-icon = true</code>).</p>
 
 <h2 id="settings"><a class="anchor" href="#settings">Settings vs. the config file</a></h2>
 <p>Both edit the same file — <code>~/.config/zephr/config.toml</code>. The Settings window changes only the keys you touch and preserves your comments and formatting; hand-edits hot-reload the moment you save. Zephr is fully usable without ever opening Settings, and fully configurable without ever opening Settings. <a href="config.html">Full reference.</a></p>

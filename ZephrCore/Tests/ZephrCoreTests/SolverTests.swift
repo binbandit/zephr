@@ -5,7 +5,7 @@ import CoreGraphics
 private let w1 = WindowID(1), w2 = WindowID(2), w3 = WindowID(3)
 private let screen = CGRect(x: 0, y: 0, width: 1600, height: 1000)
 
-@Suite("Solver — tiles")
+@Suite("Solver - tiles")
 struct SolverTilesTests {
     @Test func singleWindowGetsOuterGappedRect() {
         let s = Workspace(id: 1)
@@ -88,7 +88,7 @@ struct SolverTilesTests {
     }
 }
 
-@Suite("Solver — accordion and monocle")
+@Suite("Solver - accordion and monocle")
 struct SolverAccordionTests {
     @Test func accordionGivesFocusedAlmostEverything() {
         let s = Workspace(id: 1)
@@ -137,7 +137,7 @@ struct SolverAccordionTests {
     }
 }
 
-@Suite("Solver — degenerate inputs")
+@Suite("Solver - degenerate inputs")
 struct SolverDegenerateTests {
 
     /// Every emitted frame must be finite, non-negatively sized, and inside
@@ -237,7 +237,7 @@ struct CoordinateTests {
     }
 }
 
-@Suite("Solver — degenerate rects are refused, not laid out")
+@Suite("Solver - degenerate rects are refused, not laid out")
 struct SolverDegenerateRectTests {
 
     /// `.null` is rejected by the finiteness clause alone; `.infinite` is

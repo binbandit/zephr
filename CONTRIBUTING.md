@@ -20,15 +20,24 @@ override everything else, and §-references in code comments point into it.
 - `ZephrCore/` — pure Swift package (zero AppKit): i3-style tree
   (`TreeNode`, `Workspace`), multi-display model (`WorkspaceModel`), layout
   solver (`Solver`), off-screen stash geometry (`StashPlanner`), per-app
-  rules (`Rules`), command vocabulary (`Command`). All geometry is global CG
-  coordinates (top-left origin, y-down); AppKit rects are converted at the
-  boundary with `cocoaToGlobal`.
+  rules (`Rules`), command vocabulary (`Command`) and its shared parser
+  (`CommandParsing`, which both `[[bind]]` and `zephrctl` speak), Space
+  membership (`SpaceMembership`), CG-window correlation (`WindowProbe`),
+  focus-border appearance (`FocusBorderStyle`), config parse and line-edit
+  (`ConfigFile`, `ConfigEdit`). All geometry is global CG coordinates
+  (top-left origin, y-down); AppKit rects are converted at the boundary with
+  `cocoaToGlobal`.
 - `Zephr/` — the app (files are auto-included via the Xcode synchronized
   group; no pbxproj edits needed for new files):
   - `Services/AppAXConnection.swift` — one actor per target app on its own
     dispatch queue; ALL AX calls for a pid go through it (anti-stall, §6.3).
   - `Services/ObserverHub.swift` — AXObserver notifications → engine events.
-  - `Services/HotkeyService.swift` — CGEvent tap, ⌃⌥ chords, leader layer.
+  - `Services/HotkeyService.swift` - CGEvent tap, ⌃⌥ chords, leader layer,
+    user `[[bind]]` bindings (consulted before the preset tables), Carbon
+    fallback under Secure Input.
+  - `Support/SpaceProbe.swift` - the one `CGWindowListCopyWindowInfo` reader:
+    active-Space membership and window levels. Never reads `kCGWindowName`
+    (that needs Screen Recording, §6.1).
   - `Engine/TilingEngine.swift` — MainActor orchestrator; the ZephrCore
     model is the source of truth, reality is reconciled against it (§6.4).
   - `UI/` — command strip HUD, permission gate; `ZephrApp.swift` menu bar.
@@ -44,7 +53,7 @@ override everything else, and §-references in code comments point into it.
   normalization and the window index stay consistent; `Workspace.validate()`
   is the invariant checker the property tests lean on.
 
-## Status (August 2026)
+## Status (September 2026)
 
 Implemented: P0–P2 foundations; config file with defaults written on first
 run + hot reload (`ConfigFile` in Core, `ConfigService` in app — interim
@@ -104,16 +113,51 @@ not release the others. **This path has not yet been exercised against a
 real multi-Space desktop** — the matching logic is unit-tested, the probe
 is not.
 
+Classification wave (Aug 2026): window adoption reads the CoreGraphics
+window level through `SpaceProbe`/`WindowProbe` and refuses anything off the
+normal layer, so screen-share bars and screenshot overlays stop being tiled;
+an app that comes back *bigger* on one axis is recorded as stating a minimum
+(per axis, confirmed on a second identical read-back) and the solver
+respects it, instead of the veto path floating an ordinary editor;
+`StashPlanner` parks windows in a bottom corner and ranks candidates by how
+little they spill onto a neighbouring display, because macOS clamps
+downward moves and a due-south stash left a visible strip.
+
+Controls wave (Aug 2026): `balance` evens out every tiled container in the
+workspace rather than the focused one alone; `resize` takes an explicit
+sign (the direction is where the far edge goes) so a key means one thing
+wherever the window sits, and does nothing rather than the opposite at a
+hard edge; new commands `joinWith` / `flatten` / `setOrientation` /
+`toggleOrientation` (leader `g` / `⇧G` / `o`), `moveWindowToDisplay` /
+`moveWorkspaceToDisplay` / `summonWorkspace` / `togglePauseDisplay`
+(leader `⇧tab` / `d` / palette / `⇧D`); `[[bind]]` blocks bind any chord or
+layer key to any command in `Command.parse`'s vocabulary, checked ahead of
+the preset tables; `FocusBorderStyle` makes the border's color, width, and
+corner radius configurable, and the border no longer draws over a display a
+fullscreen window has taken.
+
 Known gaps: ~27 `applyAll()` sites still exist as call sites (harmless now
 they coalesce, but the audit loops would read better with an explicit
 invalidate); the write-tracking state on `ManagedWindow`
 (`lastAppliedFrame`, `lastSettledFrame`, `lastVisibleFrame`, `originalFrame`
-plus a parallel `pendingWrites` map) is three concepts wearing four names.
+plus a parallel `pendingWrites` map) is three concepts wearing four names;
+the palette's command catalogue has not grown with the controls wave - group,
+flatten, row ↔ column, the display moves and per-display pause are reachable
+by key and by `zephrctl` but are not listed there, so "every command,
+searchable" (§4.2) is not yet true; `registerCarbonFallback` claims in a
+comment that every direct chord has a Carbon twin, but ``⌃⌥⇧` `` (send
+window to display) has none and user `[[bind]]` chords are not registered at all,
+so those go dead under Secure Input; `Workspace.balance()`'s doc comment
+still opens by describing the old per-container behaviour before correcting
+itself on the next line.
 
 Not yet built (by design or needs credentials): Sparkle + notarization
 pipeline (needs an Apple Developer ID + hosted appcast), lossless TOML
 document engine (current writeback is line-targeted, full P4 item),
 first-class native-tab nodes / named layouts / scrolling layout (post-1.0
-per §7), arbitrary per-key rebinding beyond presets, the onboarding
-screen-recording asset (§4.1 — needs a real recording), frame-write
-animation (AX cannot animate; instant is Reduce-Motion-correct).
+per §7), the pick-a-window crosshair for rules (§4.3 - Settings has "Add
+Rule for Focused Window…" instead), the onboarding screen-recording asset
+(§4.1 - needs a real recording), frame-write animation (AX cannot animate;
+instant is Reduce-Motion-correct), the §6.3 perf harness (no CI job measures
+latency, RSS, or idle CPU; the os_signpost intervals exist for Instruments
+and are asserted nowhere).
