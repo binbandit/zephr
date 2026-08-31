@@ -221,6 +221,14 @@ actor AppAXConnection {
             case .alive:
                 break
             }
+            // Size, then position, then size again. A window still at its
+            // old size can have a move clamped to keep it on screen, and a
+            // window moved first can have a grow clamped by the display it
+            // has not left yet — so either single order fails on one of the
+            // two directions. AeroSpace arrived at the same sequence
+            // (their issues 143 and 335); doing it up front costs one write
+            // and saves the corrective round trip below.
+            el.set(kAXSizeAttribute, size: target.size)
             el.set(kAXPositionAttribute, point: target.origin)
             el.set(kAXSizeAttribute, size: target.size)
 
@@ -246,13 +254,22 @@ actor AppAXConnection {
             // treating it as one is how an ordinary app like an editor ends
             // up permanently floated with a learned rule to match. Record
             // the size it insisted on so the layout can stop asking.
-            let tooSmall = actual.width > target.width + 10 || actual.height > target.height + 10
-            let fits = actual.width >= target.width - 2 && actual.height >= target.height - 2
             let moved = abs(actual.origin.x - target.origin.x) > 10
                 || abs(actual.origin.y - target.origin.y) > 10
-            if tooSmall && fits {
-                result.minimums[id] = actual.size
-                continue
+            let fits = actual.width >= target.width - 2 && actual.height >= target.height - 2
+            if fits {
+                // Per axis, and only the axis that actually refused. Taking
+                // the whole size would record the *other* dimension's
+                // current value as a minimum too, which is how one window
+                // came back claiming it could be neither shorter than 1025
+                // nor taller than 240.
+                var learned = CGSize.zero
+                if actual.width > target.width + 10 { learned.width = actual.width }
+                if actual.height > target.height + 10 { learned.height = actual.height }
+                if learned != .zero {
+                    result.minimums[id] = learned
+                    continue
+                }
             }
 
             // A window that accepts the size but refuses to *move* is a veto

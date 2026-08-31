@@ -222,6 +222,18 @@ final class IPCServer {
             if line == "subscribe" {
                 subscribers.insert(fd)
                 send(#"{"ok":true,"subscribed":true}"#, to: fd)
+                // Replay the current state before any change arrives. A
+                // status bar started at login otherwise renders blank and
+                // stays blank until the user happens to switch workspace,
+                // and the obvious workaround — query first, then subscribe —
+                // races across two connections (§4.8).
+                let workspace = engine?.model.focusedWorkspace?.id ?? 1
+                let wsField = jsonString("\(workspace)")
+                send(#"{"event":"workspace_changed","initial":true,"workspace":\#(wsField)}"#, to: fd)
+                if let focused = engine?.model.focusedWindow {
+                    let winField = jsonString("\(focused.raw)")
+                    send(#"{"event":"focus_changed","initial":true,"window":\#(winField)}"#, to: fd)
+                }
                 continue
             }
             // A nil reply means the command answers asynchronously and will

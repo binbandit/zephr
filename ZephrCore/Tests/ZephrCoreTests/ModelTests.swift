@@ -283,3 +283,54 @@ struct StashCornerTests {
                 "a vertically-clamped stash still showed \(visible)pt²")
     }
 }
+
+@Suite("Stash placement in awkward monitor arrangements")
+struct StashArrangementTests {
+
+    private func visibleArea(_ frame: CGRect, on displays: [CGRect]) -> CGFloat {
+        displays.reduce(0) { $0 + frame.intersection($1).area }
+    }
+
+    /// A display flanked on both sides has no corner that spills nowhere.
+    /// Rejecting every candidate that overlaps and falling back to a corner
+    /// *inside* the display left the window almost entirely visible on the
+    /// neighbour; ranking by spill keeps the near-miss answer instead.
+    @Test func aDisplayFlankedOnBothSidesPicksTheLeastBadCorner() {
+        let left = CGRect(x: -1800, y: 0, width: 1800, height: 1169)
+        let middle = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+        let right = CGRect(x: 1800, y: 0, width: 1800, height: 1169)
+        let all = [left, middle, right]
+        let window = CGRect(x: 8, y: 47, width: 884, height: 1025)
+
+        let stashed = StashPlanner.stashFrame(for: window, on: middle, allDisplays: all)
+        let visible = visibleArea(stashed, on: all)
+        #expect(visible < window.width * window.height * 0.05,
+                "\(visible)pt² of the window stayed visible somewhere")
+        #expect(StashPlanner.looksStashed(stashed, displays: all))
+    }
+
+    /// Three in a row: the middle display is the hard one, the outer two
+    /// each have a free side and must still be hidden essentially perfectly.
+    @Test(arguments: [0, 1, 2])
+    func everyDisplayInARowCanStash(_ index: Int) {
+        let all = (0..<3).map { CGRect(x: CGFloat($0) * 1800, y: 0, width: 1800, height: 1169) }
+        let display = all[index]
+        let window = CGRect(x: display.minX + 8, y: 47, width: 884, height: 1025)
+        let stashed = StashPlanner.stashFrame(for: window, on: display, allDisplays: all)
+        let visible = visibleArea(stashed, on: all)
+        #expect(visible < window.width * window.height * 0.05,
+                "display \(index): \(visible)pt² still visible")
+    }
+
+    /// A stack of displays has no free side, only free top and bottom — the
+    /// arrangement AeroSpace's two-bottom-corners model cannot express.
+    @Test func aVerticalStackStillFindsSpace() {
+        let all = (0..<3).map { CGRect(x: 0, y: CGFloat($0) * 1169, width: 1800, height: 1169) }
+        let display = all[1]
+        let window = CGRect(x: 8, y: display.minY + 8, width: 884, height: 1025)
+        let stashed = StashPlanner.stashFrame(for: window, on: display, allDisplays: all)
+        let visible = visibleArea(stashed, on: all)
+        #expect(visible < window.width * window.height * 0.05,
+                "\(visible)pt² still visible in a vertical stack")
+    }
+}
