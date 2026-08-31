@@ -26,7 +26,17 @@ public struct PlacementSet: Sendable {
 /// minimums cannot be met, per §6.2).
 public enum Solver {
 
-    public static func solve(workspace: Workspace, in workspaceRect: CGRect, config: LayoutConfig = .default) -> PlacementSet {
+    /// `minimums` are sizes apps have demonstrated they will not shrink
+    /// below — learned from a write read-back, not guessed. Respecting them
+    /// is what stops the layout asking for something impossible over and
+    /// over, which is how an ordinary app ends up looking like it refuses
+    /// to tile at all.
+    public static func solve(
+        workspace: Workspace,
+        in workspaceRect: CGRect,
+        config: LayoutConfig = .default,
+        minimums: [WindowID: CGSize] = [:]
+    ) -> PlacementSet {
         var result = PlacementSet()
 
         // A degenerate workspace rect must never reach the frame writers: a
@@ -44,7 +54,7 @@ public enum Solver {
         let rect = workspaceRect.insetBy(gap: config.outerGap)
 
         if !workspace.root.children.isEmpty {
-            solveNode(workspace.root, rect: rect, config: config, into: &result)
+            solveNode(workspace.root, rect: rect, config: config, minimums: minimums, into: &result)
         }
 
         // Monocle: focused tiled window takes the whole workspace rect.
@@ -72,40 +82,46 @@ public enum Solver {
         return result
     }
 
-    private static func solveNode(_ node: TreeNode, rect: CGRect, config: LayoutConfig, into result: inout PlacementSet) {
+    private static func solveNode(_ node: TreeNode, rect: CGRect, config: LayoutConfig, minimums: [WindowID: CGSize], into result: inout PlacementSet) {
         if let id = node.windowID {
             result.placements[id] = Placement(frame: rect.roundedToPixels(), layer: .tiled)
             return
         }
         guard !node.children.isEmpty else { return }
         if node.children.count == 1 {
-            solveNode(node.children[0], rect: rect, config: config, into: &result)
+            solveNode(node.children[0], rect: rect, config: config, minimums: minimums, into: &result)
             return
         }
 
         switch node.layout {
         case .tiles:
-            solveTiles(node, rect: rect, config: config, into: &result)
+            solveTiles(node, rect: rect, config: config, minimums: minimums, into: &result)
         case .accordion:
-            solveAccordion(node, rect: rect, config: config, into: &result)
+            solveAccordion(node, rect: rect, config: config, minimums: minimums, into: &result)
         }
     }
 
-    private static func solveTiles(_ node: TreeNode, rect: CGRect, config: LayoutConfig, into result: inout PlacementSet) {
+    private static func solveTiles(_ node: TreeNode, rect: CGRect, config: LayoutConfig, minimums: [WindowID: CGSize], into result: inout PlacementSet) {
         let axis = node.orientation
         let n = node.children.count
         let gapTotal = config.innerGap * CGFloat(n - 1)
         let available = rect.length(along: axis) - gapTotal
 
-        let minLength = axis == .horizontal ? config.minTileSize.width : config.minTileSize.height
+        // Per child, not one number for the container: an app that has
+        // demonstrated a minimum gets it, everything else gets the config
+        // floor. Using a single value meant one large minimum either applied
+        // to every sibling or to none.
+        let mins = node.children.map {
+            minLength(for: $0, axis: axis, config: config, minimums: minimums)
+        }
         guard available > 0 else {
             // Degenerate space: fall back to accordion behavior.
-            solveAccordion(node, rect: rect, config: config, into: &result)
+            solveAccordion(node, rect: rect, config: config, minimums: minimums, into: &result)
             return
         }
-        if minLength * CGFloat(n) > available {
+        if mins.reduce(0, +) > available {
             // Minimums can't be satisfied: degrade this container (§6.2).
-            solveAccordion(node, rect: rect, config: config, into: &result)
+            solveAccordion(node, rect: rect, config: config, minimums: minimums, into: &result)
             return
         }
 
@@ -115,16 +131,16 @@ public enum Solver {
             var deficit: CGFloat = 0
             var headroom: CGFloat = 0
             for (i, len) in lengths.enumerated() {
-                if len < minLength {
-                    deficit += minLength - len
-                    lengths[i] = minLength
+                if len < mins[i] {
+                    deficit += mins[i] - len
+                    lengths[i] = mins[i]
                 } else {
-                    headroom += len - minLength
+                    headroom += len - mins[i]
                 }
             }
             if deficit <= 0.01 || headroom <= 0 { break }
-            for (i, len) in lengths.enumerated() where len > minLength {
-                lengths[i] = len - deficit * ((len - minLength) / headroom)
+            for (i, len) in lengths.enumerated() where len > mins[i] {
+                lengths[i] = len - deficit * ((len - mins[i]) / headroom)
             }
         }
 
@@ -135,14 +151,34 @@ public enum Solver {
             let childRect: CGRect = axis == .horizontal
                 ? CGRect(x: start, y: rect.minY, width: end - start, height: rect.height)
                 : CGRect(x: rect.minX, y: start, width: rect.width, height: end - start)
-            solveNode(child, rect: childRect, config: config, into: &result)
+            solveNode(child, rect: childRect, config: config, minimums: minimums, into: &result)
             cursor = end + config.innerGap
         }
     }
 
     /// Accordion: the active child gets nearly everything; each other sibling
     /// keeps a `accordionPadding`-wide sliver stacked at the edges in order.
-    private static func solveAccordion(_ node: TreeNode, rect: CGRect, config: LayoutConfig, into result: inout PlacementSet) {
+    /// How short a subtree may be along `axis`: the configured floor, raised
+    /// by anything inside it that has proven it will not go smaller.
+    ///
+    /// A container takes the largest minimum among its windows rather than
+    /// their sum. That under-states a container laid out along the same
+    /// axis, but over-stating it would degrade healthy containers to
+    /// accordion — and the redistribute pass below corrects the shortfall
+    /// anyway, where a needless accordion could not be undone.
+    private static func minLength(
+        for node: TreeNode, axis: Orientation,
+        config: LayoutConfig, minimums: [WindowID: CGSize]
+    ) -> CGFloat {
+        let floor = axis == .horizontal ? config.minTileSize.width : config.minTileSize.height
+        let learned = node.windowIDs()
+            .compactMap { minimums[$0] }
+            .map { axis == .horizontal ? $0.width : $0.height }
+            .max() ?? 0
+        return max(floor, learned)
+    }
+
+    private static func solveAccordion(_ node: TreeNode, rect: CGRect, config: LayoutConfig, minimums: [WindowID: CGSize], into result: inout PlacementSet) {
         let axis = node.orientation
         let n = node.children.count
         let focusedIdx = min(max(0, node.lastFocusedIndex), n - 1)
@@ -175,7 +211,7 @@ public enum Solver {
             let childRect: CGRect = axis == .horizontal
                 ? CGRect(x: start, y: rect.minY, width: length, height: rect.height)
                 : CGRect(x: rect.minX, y: start, width: rect.width, height: length)
-            solveNode(child, rect: childRect, config: config, into: &result)
+            solveNode(child, rect: childRect, config: config, minimums: minimums, into: &result)
         }
 
         // Active child of an accordion should sit above its collapsed siblings.

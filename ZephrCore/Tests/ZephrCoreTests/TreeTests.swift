@@ -335,7 +335,7 @@ struct ResizeTests {
         for w in [w1, w2, w3] { s.insertTiled(w) }
         s.normalize()
         _ = s.resize(w1, axis: .horizontal, delta: 0.2, minRatio: 0.05)
-        s.balance(w1)
+        s.balance()
         for c in s.root.children {
             #expect(abs(c.ratio - 1.0 / 3.0) < 0.001)
         }
@@ -498,5 +498,66 @@ struct RestructureTests {
 
         // Already on that axis: nothing to do.
         #expect(!s.setOrientation(w1, axis.flipped))
+    }
+}
+
+@Suite("Balance evens out the whole workspace")
+struct BalanceTests {
+
+    /// The bug: balancing only the focused window's own container left every
+    /// other container skewed, so a window elsewhere in the tree kept an
+    /// oversized share and looked like it had taken over the screen. Worse,
+    /// you could not fix it by balancing each window in turn — every press
+    /// undid the last.
+    @Test func nestedContainersAreEvenedOutToo() throws {
+        let s = ws()
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        _ = s.joinWith(w2, direction: s.root.orientation == .horizontal ? .right : .down)
+        try s.validate()
+
+        // Skew both levels.
+        for child in s.root.children { child.ratio = 0.5 }
+        s.root.children[0].ratio = 0.9
+        s.root.children[1].ratio = 0.1
+        if let group = s.root.children.first(where: \.isContainer) {
+            group.children[0].ratio = 0.95
+            group.children[1].ratio = 0.05
+        }
+
+        s.balance()
+        try s.validate()
+
+        let top = 1 / CGFloat(s.root.children.count)
+        for child in s.root.children {
+            #expect(abs(child.ratio - top) < 0.001, "top level not evened out")
+        }
+        let group = s.root.children.first { $0.isContainer }
+        #expect(group != nil)
+        for child in group?.children ?? [] {
+            #expect(abs(child.ratio - 0.5) < 0.001, "nested container left skewed")
+        }
+    }
+
+    /// An accordion's geometry comes from which child is focused, not from
+    /// shares, so equalising it would be a no-op dressed up as an action.
+    @Test func accordionContainersKeepTheirRatios() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.normalize()
+        s.root.layout = .accordion
+        s.root.children[0].ratio = 0.8
+        s.root.children[1].ratio = 0.2
+
+        s.balance()
+        #expect(abs(s.root.children[0].ratio - 0.8) < 0.001)
+        try s.validate()
+    }
+
+    @Test func balancingAnEmptyWorkspaceIsSafe() throws {
+        let s = ws()
+        s.balance()
+        try s.validate()
     }
 }

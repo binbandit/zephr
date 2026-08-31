@@ -164,6 +164,10 @@ actor AppAXConnection {
     struct WriteResult: Sendable {
         var applied: [WindowID: CGRect] = [:]   // read-back frames
         var vetoed: Set<WindowID> = []          // app refused the frame
+        /// Sizes apps refused to shrink below. Their own minimum, not a
+        /// refusal to be managed — the layout should respect it rather than
+        /// give up on the window.
+        var minimums: [WindowID: CGSize] = [:]
         /// A newer batch for this app already ran, so nothing was written
         /// and the empty `applied` says nothing about the app's health.
         var superseded = false
@@ -235,12 +239,26 @@ actor AppAXConnection {
                 actual = el.frame ?? actual
             }
             result.applied[id] = actual
+
+            // An app that came back *bigger* on an axis, and no smaller on
+            // either, hit its own minimum size. That is not a refusal to be
+            // tiled — it is us asking for something impossible — and
+            // treating it as one is how an ordinary app like an editor ends
+            // up permanently floated with a learned rule to match. Record
+            // the size it insisted on so the layout can stop asking.
+            let tooSmall = actual.width > target.width + 10 || actual.height > target.height + 10
+            let fits = actual.width >= target.width - 2 && actual.height >= target.height - 2
+            let moved = abs(actual.origin.x - target.origin.x) > 10
+                || abs(actual.origin.y - target.origin.y) > 10
+            if tooSmall && fits {
+                result.minimums[id] = actual.size
+                continue
+            }
+
             // A window that accepts the size but refuses to *move* is a veto
             // too (§6.4 read-back veto) — position drift matters just as
             // much, e.g. a window sitting at stash coordinates off-screen.
-            if abs(actual.width - target.width) > 10 || abs(actual.height - target.height) > 10
-                || abs(actual.origin.x - target.origin.x) > 10
-                || abs(actual.origin.y - target.origin.y) > 10 {
+            if abs(actual.width - target.width) > 10 || abs(actual.height - target.height) > 10 || moved {
                 result.vetoed.insert(id)
             }
         }

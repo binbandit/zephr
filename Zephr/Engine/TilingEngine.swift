@@ -41,6 +41,9 @@ final class TilingEngine {
         let element: AXElement
         var title: String
         var floating: Bool
+        /// Size this app refused to shrink below, learned from a write
+        /// read-back. Feeds the solver so the layout stops asking.
+        var minimumSize: CGSize?
         var minimized: Bool = false
         /// Why this window is out of the layout, if it is.
         ///
@@ -1153,8 +1156,8 @@ final class TilingEngine {
             applyAll()
 
         case .balance:
-            guard let ws = model.focusedWorkspace, let f = ws.focusedWindow else { return }
-            ws.balance(f)
+            guard let ws = model.focusedWorkspace else { return }
+            ws.balance()
             applyAll()
 
         case .rescueWindows:
@@ -1469,7 +1472,12 @@ final class TilingEngine {
         guard !paused else { return }
         guard let info = displays.first(where: { $0.id == displayID }) else { return }
         let active = model.activeWorkspace(on: displayID)
-        let solved = Solver.solve(workspace: active, in: info.visibleFrame, config: config)
+        var minimums: [WindowID: CGSize] = [:]
+        for mw in windows.values {
+            if let size = mw.minimumSize { minimums[mw.id] = size }
+        }
+        let solved = Solver.solve(
+            workspace: active, in: info.visibleFrame, config: config, minimums: minimums)
         gapBoundariesStale = true
 
         var perApp: [pid_t: [(WindowID, CGRect)]] = [:]
@@ -1550,6 +1558,15 @@ final class TilingEngine {
 
     private func noteWriteResults(_ result: AppAXConnection.WriteResult) {
         let now = ContinuousClock.now
+        // An app that would not shrink past a size is stating its minimum,
+        // not refusing to be tiled. Remember it and re-solve, so the next
+        // layout asks for something it can actually accept — and so the
+        // veto path never sees it and never floats an ordinary window.
+        for (id, size) in result.minimums where windows[id]?.minimumSize != size {
+            windows[id]?.minimumSize = size
+            Self.log.info("window \(id.raw) will not go below \(Int(size.width))x\(Int(size.height))")
+            applyAll()
+        }
         for (id, actual) in result.applied {
             // The window may have been removed while the write was in
             // flight; don't resurrect its bookkeeping.

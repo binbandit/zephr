@@ -489,10 +489,30 @@ public final class Workspace {
     }
 
     /// Equalizes shares in the focused window's container (leader =).
-    public func balance(_ id: WindowID) {
-        guard let leaf = index[id], let parent = leaf.parent else { return }
-        let share = 1 / CGFloat(parent.children.count)
-        for c in parent.children { c.ratio = share }
+    /// Evens out every tiled container in the workspace.
+    ///
+    /// Deliberately the whole tree, not just the focused window's own
+    /// container. "Balance sizes" is what people reach for when a layout has
+    /// drifted into something lopsided, and evening out one container while
+    /// leaving its siblings skewed does not answer that — it just moves
+    /// which part looks wrong. Balancing one container also cannot be
+    /// composed into balancing the workspace, because focusing each window
+    /// in turn and pressing the key undoes the previous one.
+    ///
+    /// Accordion containers keep their ratios: their geometry comes from
+    /// which child is focused, not from shares, so equalising them would be
+    /// a no-op that only looks like one.
+    public func balance() {
+        balanceSubtree(root)
+    }
+
+    private func balanceSubtree(_ node: TreeNode) {
+        guard node.isContainer, !node.children.isEmpty else { return }
+        if node.layout == .tiles {
+            let share = 1 / CGFloat(node.children.count)
+            for child in node.children { child.ratio = share }
+        }
+        for child in node.children { balanceSubtree(child) }
     }
 
     /// Groups `id` with its neighbour in `direction` inside a new container
