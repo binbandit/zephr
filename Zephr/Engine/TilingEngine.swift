@@ -73,6 +73,20 @@ final class TilingEngine {
     private(set) var connections: [pid_t: AppAXConnection] = [:]
     /// Apps *we* hid for the stash — never touch apps the user hid (⌘H).
     private var hiddenApps: Set<pid_t> = []
+    /// Cached CoreGraphics window list, for classifying newly adopted
+    /// windows. Adoption arrives in bursts — thirty windows at launch — and
+    /// each lookup would otherwise re-read the whole list.
+    private var levelCache: (taken: ContinuousClock.Instant, byPID: [pid_t: [WindowProbe.Entry]])?
+
+    private func windowLevel(of frame: CGRect, pid: pid_t) -> Int? {
+        let now = ContinuousClock.now
+        if levelCache == nil || now - levelCache!.taken > .milliseconds(250) {
+            levelCache = (now, SpaceProbe.onScreenWindows())
+        }
+        guard let entries = levelCache?.byPID[pid] else { return nil }
+        return WindowProbe.level(of: frame, among: entries)
+    }
+
     /// The frame each window had before Zephr ever touched it, keyed by the
     /// AX element so it survives re-adoption.
     ///
@@ -517,6 +531,18 @@ final class TilingEngine {
         if let subrole = snap.subrole,
            subrole != kAXStandardWindowSubrole as String,
            !Self.floatSubroles.contains(subrole) {
+            await conn.unregister(id)
+            return
+        }
+
+        // Anything above the normal window layer is chrome, whatever AX says
+        // about it: screen-share control bars, screenshot overlays, reminder
+        // popups and picture-in-picture panels all report themselves as
+        // standard windows with a close button, and tiling them puts a tile
+        // where the user sees an overlay. Only an unambiguous match counts —
+        // see `WindowProbe`.
+        if let level = windowLevel(of: snap.frame, pid: pid), level != SpaceProbe.normalLevel {
+            Self.log.info("ignoring window at level \(level) (pid \(pid)): not an ordinary window")
             await conn.unregister(id)
             return
         }
