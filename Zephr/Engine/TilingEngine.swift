@@ -780,11 +780,13 @@ final class TilingEngine {
     /// never written to any window.
     private func reconcileSpaces() {
         guard !paused else { return }
-        // A native-fullscreen window sits on its own Space, so while one
-        // exists the on-screen list describes a Space the tiled windows were
-        // never on. `SpaceMembership` refuses a wholesale withdrawal anyway,
-        // but there is nothing useful to learn from the probe here.
-        guard !windows.values.contains(where: { $0.fullscreen }) else { return }
+        // NB: no fullscreen guard. Skipping while any window is fullscreen
+        // looks prudent and is in fact a permanent off switch — somebody
+        // always has something fullscreen, so off-Space windows were never
+        // withdrawn and their tiles stood empty forever. The case that
+        // guard was written for, entering fullscreen making every *other*
+        // window look absent at once, is already handled where it belongs:
+        // `SpaceMembership.absent` refuses a wholesale withdrawal.
         // The lock screen and the screen saver own the display and report
         // almost nothing else on it. Judging window membership against that
         // would be judging against a Space the user cannot even see.
@@ -823,7 +825,10 @@ final class TilingEngine {
                 pid: mw.pid,
                 frame: mw.lastSettledFrame ?? mw.lastAppliedFrame ?? mw.lastVisibleFrame))
         }
-        for id in SpaceMembership.absent(candidates: candidates, onScreenByPID: onScreen) {
+        let absent = SpaceMembership.absent(candidates: candidates, onScreenByPID: onScreen)
+        Self.log.info(
+            "space reconcile: \(candidates.count) visible, \(onScreen.values.reduce(0) { $0 + $1.count }) on screen, \(absent.count) elsewhere")
+        for id in absent {
             withdraw(id, reason: .offSpace)
         }
     }
