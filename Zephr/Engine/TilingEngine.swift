@@ -17,6 +17,10 @@ final class AppState {
     var workspaceNames: [Int: String] = [:]
     /// Active workspace per connected display, in display order.
     var displayWorkspaces: [Int] = []
+    /// One row per display: which workspace it shows, and whether it is the
+    /// one commands land on. The menu needs the display identity, not just
+    /// the numbers, so a workspace can be picked *for a chosen screen*.
+    var displayRows: [(id: DisplayID, workspace: Int, focused: Bool)] = []
     /// Whether the status-bar item is shown (config `menu-bar-icon`).
     var showMenuBarIcon: Bool = true
 }
@@ -104,7 +108,7 @@ final class TilingEngine {
 
     /// Pids with an in-flight `maybeHideApp` probe.
     private var hideProbesInFlight: Set<pid_t> = []
-    private var displays: [DisplayInfo] = []
+    private(set) var displays: [DisplayInfo] = []
     /// Recent frame writes, to tell our own echo events from user drift.
     private var pendingWrites: [WindowID: (frame: CGRect, at: ContinuousClock.Instant)] = [:]
     private var reapplyDebounce: [DisplayID: Task<Void, Never>] = [:]
@@ -889,6 +893,12 @@ final class TilingEngine {
                 if let snap = await conn.snapshot(of: id) {
                     ws.setFloatingFrame(id, frame: snap.frame)
                     self.windows[id]?.lastVisibleFrame = snap.frame
+                    // The border is drawn from `lastVisibleFrame`, so a
+                    // window that moved or resized leaves it stroked around
+                    // empty desktop — which reads as a blank window sitting
+                    // where the real one used to be, with the real one now
+                    // unmarked.
+                    self.syncAppState()
                     self.persistSoon()
                 }
             }
@@ -916,6 +926,19 @@ final class TilingEngine {
         }
 
         // App moved itself: snap back to the model.
+        if id == model.focusedWindow {
+            // Same reason as the float path above: refresh the outline
+            // against the frame the window actually has now, not the one it
+            // had when it was last laid out.
+            if let conn = connections[mw.pid] {
+                Task {
+                    if let snap = await conn.snapshot(of: id) {
+                        self.windows[id]?.lastVisibleFrame = snap.frame
+                        self.syncAppState()
+                    }
+                }
+            }
+        }
         if let home = ws.homeDisplay { scheduleReapply(home) }
     }
 
@@ -1287,6 +1310,13 @@ final class TilingEngine {
             applyAll()
             focusModelFallback()
 
+        case .summonWorkspace(let n):
+            guard let display = model.focusedDisplay else { return }
+            let affected = model.moveWorkspace(n, toDisplay: display)
+            guard !affected.isEmpty else { return }
+            applyAll()
+            focusModelFallback()
+
         case .togglePauseDisplay:
             guard let display = model.focusedDisplay else { return }
             togglePause(display: display)
@@ -1521,6 +1551,24 @@ final class TilingEngine {
             node = n.parent
         }
         if focusDependent { applyDisplay(home) }
+    }
+
+    /// Switches a *named* display to a workspace, rather than letting the
+    /// workspace's own home decide. The menu needs this: picking "Workspace
+    /// 3" from a list gives no clue which screen it will affect, and the
+    /// answer depending on where that workspace happens to live is exactly
+    /// the surprise to avoid.
+    func goToWorkspace(_ n: Int, on display: DisplayID) {
+        let affected = model.activateWorkspace(n, on: display)
+        for d in affected { applyDisplay(d) }
+        model.focusDisplay(display)
+        if let target = model.focusedWorkspace?.focusedWindow
+            ?? model.focusedWorkspace?.fallbackFocus() {
+            focusWindow(target)
+        } else {
+            NSRunningApplication.current.activate()
+        }
+        syncAppState()
     }
 
     private func focusModelFallback() {
@@ -2332,6 +2380,10 @@ final class TilingEngine {
         appState.managedWindowCount = windows.count
         // Per-display indicator (§4.4): "3·1" with the focused one leading.
         appState.displayWorkspaces = displays.compactMap { model.activeWorkspaceByDisplay[$0.id] }
+        appState.displayRows = displays.compactMap { info in
+            guard let ws = model.activeWorkspaceByDisplay[info.id] else { return nil }
+            return (info.id, ws, info.id == model.focusedDisplay)
+        }
 
         // Focus border tracks the focused visible window's target frame —
         // but only while that window's app is actually frontmost.
@@ -2385,7 +2437,7 @@ final class TilingEngine {
         rules.userRules = parsed.userRules
         model.defaultContainerLayout = parsed.defaultLayout
         workspaceCallbacks = parsed.onWorkspaceChanged
-        focusBorder?.enabled = parsed.focusBorder
+        focusBorder?.style = parsed.focusBorder
         for (n, name) in parsed.workspaceNames {
             model.workspace(n).name = name
         }

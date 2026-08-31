@@ -63,19 +63,40 @@ private struct MenuContent: View {
             Divider()
         }
 
-        ForEach(1...9, id: \.self) { n in
-            Button {
-                AppDelegate.shared?.engine.perform(.goToWorkspace(n))
-            } label: {
-                let name = appState.workspaceNames[n].flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
-                let check = n == appState.currentWorkspace ? "✓ " : ""
-                Text("\(check)Workspace \(n)\(name)")
+        // With one display a flat list is right. With more, it is actively
+        // misleading: "Workspace 3" gives no clue which screen it will
+        // affect, and the answer depending on where that workspace happens
+        // to live reads as the menu changing every display at once. Each
+        // screen gets its own submenu, and picking there says which.
+        if appState.displayRows.count > 1 {
+            ForEach(Array(appState.displayRows.enumerated()), id: \.offset) { index, row in
+                Menu("Display \(index + 1)\(row.focused ? " (focused)" : "") · Workspace \(row.workspace)") {
+                    ForEach(1...9, id: \.self) { n in
+                        Button {
+                            AppDelegate.shared?.engine.goToWorkspace(n, on: row.id)
+                        } label: {
+                            let name = appState.workspaceNames[n].flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
+                            let check = n == row.workspace ? "✓ " : ""
+                            Text("\(check)Workspace \(n)\(name)")
+                        }
+                    }
+                }
             }
-            // §4.2: the shortcut hint tracks the active key preset — under
-            // vim (leader-only) there is no chord to advertise.
-            .keyboardShortcut(ChordHints.menuModifiers.map {
-                KeyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: $0)
-            })
+        } else {
+            ForEach(1...9, id: \.self) { n in
+                Button {
+                    AppDelegate.shared?.engine.perform(.goToWorkspace(n))
+                } label: {
+                    let name = appState.workspaceNames[n].flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
+                    let check = n == appState.currentWorkspace ? "✓ " : ""
+                    Text("\(check)Workspace \(n)\(name)")
+                }
+                // §4.2: the shortcut hint tracks the active key preset —
+                // under vim (leader-only) there is no chord to advertise.
+                .keyboardShortcut(ChordHints.menuModifiers.map {
+                    KeyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: $0)
+                })
+            }
         }
 
         Divider()

@@ -34,7 +34,7 @@ struct ConfigTests {
         #expect(parsed.leader == LeaderBinding(control: true, option: true, key: "space"))
         #expect(parsed.layout.innerGap == 12)
         #expect(parsed.layout.outerGap == 4)
-        #expect(parsed.focusBorder == false)
+        #expect(parsed.focusBorder.enabled == false)
         #expect(parsed.defaultLayout == .accordion)
         #expect(parsed.onWorkspaceChanged == ["echo one", "echo two"])
     }
@@ -288,6 +288,102 @@ struct ConfigTests {
         #expect(parsed.workspaceNames[1] == #"a "b" # not a comment"#)
         #expect(parsed.userRules.count == 1)
         #expect(parsed.userRules[0].titlePattern == #"Save "draft" #1"#)
+    }
+
+    @Test func focusBorderAppearanceParses() throws {
+        let parsed = try ConfigFile.parse("""
+        [layout]
+        focus-border-color = "#7AA2F7CC"
+        focus-border-width = 3
+        focus-border-radius = 0
+        """)
+        #expect(parsed.focusBorder.enabled) // untouched by the appearance keys
+        #expect(parsed.focusBorder.color == RGBAColor(hex: "#7AA2F7CC"))
+        #expect(parsed.focusBorder.width == 3)
+        #expect(parsed.focusBorder.cornerRadius == 0)
+    }
+
+    @Test func accentKeywordMeansUnset() throws {
+        // "unset" has to stay distinguishable from "set to a color": the
+        // accent is a live system setting, so no hex can stand in for it.
+        #expect(try ConfigFile.parse("[layout]\nfocus-border-color = \"accent\"").focusBorder.color == nil)
+        #expect(try ConfigFile.parse("[layout]\nfocus-border-color = \"ACCENT\"").focusBorder.color == nil)
+        #expect(try ConfigFile.parse("[layout]\nfocus-border-color = \"accent\"").warnings.isEmpty)
+        #expect(try ConfigFile.parse("[layout]\nfocus-border = false").focusBorder == FocusBorderStyle(enabled: false))
+    }
+
+    @Test func badBorderAppearanceWarnsAndKeepsTheRestOfTheFile() throws {
+        // Cosmetic keys warn and fall back; a typo in one must not cost the
+        // user every other edit in the same save (§4.6).
+        let parsed = try ConfigFile.parse("""
+        [layout]
+        gaps = 12
+        focus-border-color = "burnt sienna"
+        focus-border-width = 900
+        focus-border-radius = nan
+        """)
+        #expect(parsed.focusBorder == .default)
+        #expect(parsed.layout.innerGap == 12)
+        #expect(parsed.warnings.count == 3)
+        #expect(parsed.warnings[0].contains("line 3") && parsed.warnings[0].contains("is not a color"))
+        #expect(parsed.warnings[1].contains("line 4") && parsed.warnings[1].contains("0.5 to 20"))
+        #expect(parsed.warnings[2].contains("line 5") && parsed.warnings[2].contains("0 to 64"))
+    }
+
+    @Test func bareHashColorNamesTheRealProblem() {
+        // `#` opens a comment, so this line parses as a value-less key. The
+        // bare message ("missing value") points at a line that looks fine.
+        #expect(throws: ConfigError(
+            line: 2,
+            message: "missing value for `focus-border-color` — `#` starts a comment; quote it as \"#7AA2F7\""
+        )) {
+            _ = try ConfigFile.parse("[layout]\nfocus-border-color = #7AA2F7")
+        }
+    }
+
+    @Test func focusBorderTypoGetsASuggestion() throws {
+        let parsed = try ConfigFile.parse("[layout]\nfocus-border-colour = \"#fff\"")
+        #expect(parsed.warnings.count == 1)
+        #expect(parsed.warnings[0].contains("did you mean `focus-border-color`"))
+    }
+}
+
+@Suite("Hex colors")
+struct HexColorTests {
+
+    @Test func acceptedForms() throws {
+        let blue = RGBAColor(red: 0x7A / 255, green: 0xA2 / 255, blue: 0xF7 / 255)
+        #expect(RGBAColor(hex: "#7AA2F7") == blue)
+        #expect(RGBAColor(hex: "7aa2f7") == blue)          // no #, lowercase
+        #expect(RGBAColor(hex: "  #7AA2F7  ") == blue)     // surrounding space
+        #expect(RGBAColor(hex: "#000") == RGBAColor(red: 0, green: 0, blue: 0))
+        // #RGB doubles each nibble, so "f" is 255 and not 15.
+        #expect(RGBAColor(hex: "#fff") == RGBAColor(red: 1, green: 1, blue: 1))
+        #expect(RGBAColor(hex: "#FF000080")?.alpha == 128.0 / 255)
+        #expect(RGBAColor(hex: "#FF0000FF") == RGBAColor(red: 1, green: 0, blue: 0, alpha: 1))
+    }
+
+    @Test func garbageIsRejectedRatherThanGuessed() {
+        // Every one of these has to come back nil so the parser can warn with
+        // a line number instead of painting an arbitrary color.
+        for bad in ["", "#", "#12", "#12345", "#1234567", "#123456789",
+                    "burnt sienna", "#GGHHII", "0x7AA2F7", "#-12345", "#+00FF00",
+                    "rgb(1,2,3)", "＃ＦＦＦ"] {
+            #expect(RGBAColor(hex: bad) == nil, "\(bad) should not parse")
+        }
+    }
+
+    @Test func hexStringRoundTrips() throws {
+        // What the Settings color well writes must be re-readable by hand.
+        for hex in ["#000000", "#FFFFFF", "#7AA2F7", "#7AA2F7CC", "#12345678"] {
+            let color = try #require(RGBAColor(hex: hex))
+            #expect(color.hexString == hex)
+            #expect(RGBAColor(hex: color.hexString) == color)
+        }
+        // Opaque colors drop the redundant alpha pair.
+        #expect(RGBAColor(hex: "#7AA2F7FF")?.hexString == "#7AA2F7")
+        // Out-of-gamut components clamp instead of overflowing the format.
+        #expect(RGBAColor(red: -1, green: 2, blue: 0.5).hexString == "#00FF80")
     }
 }
 

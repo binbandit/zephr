@@ -55,7 +55,7 @@ public struct LeaderBinding: Sendable, Equatable {
 public struct ParsedConfig: Sendable, Equatable {
     public var leader: LeaderBinding = .default
     public var layout: LayoutConfig = .default
-    public var focusBorder: Bool = true
+    public var focusBorder: FocusBorderStyle = .default
     public var defaultLayout: ContainerLayout = .tiles
     public var keyPreset: String = "default"
     public var userRules: [WindowRule] = []
@@ -105,6 +105,9 @@ public enum ConfigFile {
     accordion-padding = 48        # collapsed sliver width in accordion layout
     focus-border = true           # accent border on the focused window
     default = "tiles"             # tiles | accordion
+    # focus-border-color = "#7AA2F7CC"  # hex, alpha optional; "accent" follows macOS
+    # focus-border-width = 2            # outline thickness in points
+    # focus-border-radius = 19          # outline corner radius; 0 for square corners
 
     [keys]
     preset = "default"            # default: ⌃⌥ chords · i3: ⌘⌥ · aerospace: bare ⌥ (breaks ⌥-typing!) · vim: leader-only
@@ -187,7 +190,16 @@ public enum ConfigFile {
                 throw ConfigError(line: lineNumber, message: "missing key before `=`")
             }
             guard !rawValue.isEmpty else {
-                throw ConfigError(line: lineNumber, message: "missing value for `\(key)`")
+                // TOML reads `key = #7AA2F7` as an empty value followed by a
+                // comment. A hex color is the one value users naturally type
+                // with a bare `#`, and "missing value" alone leaves them
+                // staring at a line that looks perfectly fine.
+                let typed = rawLine.drop { $0 != "=" }.dropFirst()
+                    .trimmingCharacters(in: .whitespaces)
+                let hint = typed.hasPrefix("#")
+                    ? " — `#` starts a comment; quote it as \"\(typed)\""
+                    : ""
+                throw ConfigError(line: lineNumber, message: "missing value for `\(key)`\(hint)")
             }
 
             let sectionID: String?
@@ -246,7 +258,35 @@ public enum ConfigFile {
                 case "accordion-padding":
                     config.layout.accordionPadding = try number(rawValue, line: lineNumber, range: 2...400)
                 case "focus-border":
-                    config.focusBorder = try bool(rawValue, line: lineNumber)
+                    config.focusBorder.enabled = try bool(rawValue, line: lineNumber)
+                // The three appearance keys warn and keep their default
+                // rather than throwing. A bad `gaps` changes where every
+                // window lands, so holding the whole file back is right; the
+                // border only paints, and losing every other edit in the same
+                // save over a mistyped color is the worse trade (§4.6, the
+                // same call as an unbindable leader key).
+                case "focus-border-color":
+                    let value = try string(rawValue, line: lineNumber)
+                    if value.caseInsensitiveCompare("accent") == .orderedSame {
+                        config.focusBorder.color = nil
+                    } else if let color = RGBAColor(hex: value) {
+                        config.focusBorder.color = color
+                    } else {
+                        config.focusBorder.color = nil
+                        config.warnings.append("line \(lineNumber): \"\(value)\" is not a color — use \"accent\" or a hex like \"#7AA2F7\" or \"#7AA2F7CC\"; using the accent color")
+                    }
+                case "focus-border-width":
+                    if let width = optionalNumber(rawValue, range: 0.5...20) {
+                        config.focusBorder.width = width
+                    } else {
+                        config.warnings.append("line \(lineNumber): `focus-border-width` must be a number from 0.5 to 20, got \(rawValue) — using the default")
+                    }
+                case "focus-border-radius":
+                    if let radius = optionalNumber(rawValue, range: 0...64) {
+                        config.focusBorder.cornerRadius = radius
+                    } else {
+                        config.warnings.append("line \(lineNumber): `focus-border-radius` must be a number from 0 to 64, got \(rawValue) — matching the system window corners")
+                    }
                 case "default":
                     let value = try string(rawValue, line: lineNumber)
                     guard let layout = ContainerLayout(rawValue: value) else {
@@ -352,7 +392,10 @@ public enum ConfigFile {
 
     private static let knownKeys: [String?: [String]] = [
         nil: ["leader", "dock-icon", "menu-bar-icon"],
-        "layout": ["gaps", "inner-gaps", "outer-gaps", "accordion-padding", "focus-border", "default"],
+        "layout": [
+            "gaps", "inner-gaps", "outer-gaps", "accordion-padding", "default",
+            "focus-border", "focus-border-color", "focus-border-width", "focus-border-radius",
+        ],
         "keys": ["preset", "one-shot", "layer-timeout"],
         "callbacks": ["on-workspace-changed"],
         "workspaces": ["float-by-default"],
@@ -470,6 +513,14 @@ public enum ConfigFile {
         guard range.contains(value) else {
             throw ConfigError(line: line, message: "\(raw) is outside \(Int(range.lowerBound))–\(Int(range.upperBound))")
         }
+        return CGFloat(value)
+    }
+
+    /// `number` for keys that warn instead of throwing: nil covers "not a
+    /// number", "not finite" and "out of range" alike, because the caller
+    /// says the same thing about all three.
+    private static func optionalNumber(_ raw: String, range: ClosedRange<Double>) -> CGFloat? {
+        guard let value = Double(raw), value.isFinite, range.contains(value) else { return nil }
         return CGFloat(value)
     }
 

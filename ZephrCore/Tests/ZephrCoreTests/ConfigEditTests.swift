@@ -201,6 +201,25 @@ struct ConfigEditTests {
         #expect(ConfigEdit.splitComment("plain = 1").comment == nil)
     }
 
+    /// `focus-border` is a prefix of `focus-border-color`, so a sloppy match
+    /// would have the color write land on the enable line (or the enable
+    /// write land on the color) — a silent data swap either way.
+    @Test func siblingKeysSharingAPrefixAreNotConfused() throws {
+        var l = lines(ConfigFile.defaultText)
+        l = ConfigEdit.setValue(l, section: "layout", key: "focus-border-color", value: "\"#7AA2F7CC\"")
+        l = ConfigEdit.setValue(l, section: "layout", key: "focus-border-width", value: "3")
+        l = ConfigEdit.setValue(l, section: "layout", key: "focus-border", value: "false")
+
+        let parsed = try ConfigFile.parse(text(l))
+        #expect(parsed.warnings.isEmpty, "\(parsed.warnings)")
+        #expect(parsed.focusBorder == FocusBorderStyle(
+            enabled: false, color: RGBAColor(hex: "#7AA2F7CC"), width: 3))
+        // Each key owns exactly one live line.
+        for key in ["focus-border", "focus-border-color", "focus-border-width"] {
+            #expect(l.filter { ConfigEdit.declaresKey($0, key: key) }.count == 1, "\(key) should own exactly one line")
+        }
+    }
+
     /// Every shipped default must parse without a single warning — the file
     /// the user is handed on first run is also the file they learn from.
     @Test func theShippedDefaultsParseCleanly() throws {
