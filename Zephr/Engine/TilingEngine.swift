@@ -423,6 +423,11 @@ final class TilingEngine {
     }
 
     private func appActivated(pid: pid_t) {
+        // Retire the focus border first: activating an app Zephr does not
+        // manage (or one whose focused window it does not) still has to take
+        // the outline off screen, and the paths below all return early for
+        // exactly those cases.
+        syncAppState()
         guard let conn = connections[pid] else { return }
         Task {
             guard let element = await conn.focusedWindowElement(),
@@ -1944,8 +1949,17 @@ final class TilingEngine {
         // Per-display indicator (§4.4): "3·1" with the focused one leading.
         appState.displayWorkspaces = displays.compactMap { model.activeWorkspaceByDisplay[$0.id] }
 
-        // Focus border tracks the focused visible window's target frame.
-        if let f = model.focusedWindow, let mw = windows[f], isVisible(f), !mw.minimized {
+        // Focus border tracks the focused visible window's target frame —
+        // but only while that window's app is actually frontmost.
+        //
+        // The overlay lives in Zephr's process at `.floating` level, which
+        // is what makes it visible at all (an agent app never activates, so
+        // a normal-level panel would sit *behind* the window it outlines).
+        // The cost is that it also floats above every other app, so without
+        // this check it keeps drawing over whatever the user switched to.
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if let f = model.focusedWindow, let mw = windows[f], isVisible(f), !mw.minimized,
+           mw.pid == frontmost {
             focusBorder?.update(frame: mw.lastVisibleFrame)
         } else {
             focusBorder?.update(frame: nil)
