@@ -247,6 +247,44 @@ public final class WorkspaceModel {
         return [target]
     }
 
+    /// Re-homes workspace `n` onto `display`, and gives the display it left
+    /// something to show.
+    ///
+    /// The relationship was one-way before this: `homeDisplay` was assigned
+    /// by the model and by profile restore, and nothing the user could do
+    /// reassigned it — so a workspace that ended up on the laptop panel
+    /// stayed there, and pressing its number yanked focus across instead of
+    /// bringing the workspace over. Returns the displays whose contents
+    /// changed.
+    @discardableResult
+    public func moveWorkspace(_ n: Int, toDisplay display: DisplayID) -> Set<DisplayID> {
+        guard displays.contains(display) else { return [] }
+        let ws = workspace(n)
+        guard ws.homeDisplay != display else { return [] }
+        var affected: Set<DisplayID> = [display]
+
+        // If it was on screen somewhere, that display needs a replacement —
+        // otherwise it would keep showing a workspace that now lives
+        // elsewhere.
+        if let previous = activeWorkspaceByDisplay.first(where: { $0.value == n })?.key {
+            activeWorkspaceByDisplay.removeValue(forKey: previous)
+            affected.insert(previous)
+        }
+        // The target's current occupant goes back to being just a workspace.
+        activeWorkspaceByDisplay[display] = n
+        ws.homeDisplay = display
+        ws.preferredDisplay = display
+
+        // Every display still needs something active, including the one we
+        // just vacated.
+        for d in displays where activeWorkspaceByDisplay[d] == nil {
+            _ = activeWorkspace(on: d)
+            affected.insert(d)
+        }
+        focusedDisplay = display
+        return affected
+    }
+
     /// Moves every window in the model into the given workspace — the
     /// `leader w` rescue command backing the "never lose a window" invariant.
     /// Windows move in ascending id order: Dictionary key order varies with

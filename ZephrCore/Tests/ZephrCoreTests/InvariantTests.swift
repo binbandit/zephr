@@ -525,3 +525,61 @@ struct DisplayChurnTests {
         #expect(m.activeWorkspaceByDisplay[d2] == 6, "the other display must not move")
     }
 }
+
+@Suite("Moving a workspace between displays")
+struct MoveWorkspaceTests {
+
+    @Test func aWorkspaceFollowsTheDisplayItIsSentTo() {
+        let m = WorkspaceModel()
+        m.syncDisplays([d1, d2])
+        let onD1 = m.activeWorkspaceByDisplay[d1]!
+        m.insertWindow(w1, workspace: onD1)
+
+        let affected = m.moveWorkspace(onD1, toDisplay: d2)
+        #expect(m.workspace(onD1).homeDisplay == d2)
+        #expect(m.activeWorkspaceByDisplay[d2] == onD1)
+        #expect(affected.contains(d1) && affected.contains(d2))
+        // Its windows come with it.
+        #expect(m.workspace(onD1).contains(w1))
+    }
+
+    /// The display it left cannot be left showing a workspace that now
+    /// lives somewhere else.
+    @Test func theVacatedDisplayGetsSomethingElse() {
+        let m = WorkspaceModel()
+        m.syncDisplays([d1, d2])
+        let onD1 = m.activeWorkspaceByDisplay[d1]!
+        _ = m.moveWorkspace(onD1, toDisplay: d2)
+
+        let replacement = m.activeWorkspaceByDisplay[d1]
+        #expect(replacement != nil)
+        #expect(replacement != onD1, "the vacated display still shows the moved workspace")
+        #expect((1...9).contains(replacement!))
+    }
+
+    @Test func movingToTheDisplayItIsAlreadyOnDoesNothing() {
+        let m = WorkspaceModel()
+        m.syncDisplays([d1, d2])
+        let onD1 = m.activeWorkspaceByDisplay[d1]!
+        #expect(m.moveWorkspace(onD1, toDisplay: d1).isEmpty)
+    }
+
+    @Test func anUnknownDisplayIsRefused() {
+        let m = WorkspaceModel()
+        m.syncDisplays([d1])
+        #expect(m.moveWorkspace(1, toDisplay: d3).isEmpty)
+    }
+
+    /// A redock must not drag it back: the move is a deliberate choice and
+    /// updates the remembered preference too.
+    @Test func theMoveSurvivesAnUndockRedock() {
+        let m = WorkspaceModel()
+        m.syncDisplays([d1, d2])
+        let onD1 = m.activeWorkspaceByDisplay[d1]!
+        _ = m.moveWorkspace(onD1, toDisplay: d2)
+
+        m.syncDisplays([d1])
+        m.syncDisplays([d1, d2])
+        #expect(m.workspace(onD1).homeDisplay == d2)
+    }
+}
