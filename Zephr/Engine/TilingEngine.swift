@@ -703,7 +703,18 @@ final class TilingEngine {
            ownedBySystem.contains(front) {
             return
         }
-        let onScreen = SpaceProbe.onScreenWindowsByPID()
+        // Drop our own stashed windows from the live side. "On screen" in
+        // `CGWindowList` means *on this Space and not minimized* — it says
+        // nothing about geometry, so a window parked off-display by
+        // `StashPlanner` is still listed. Counting those against a candidate
+        // set that only holds *visible* windows makes the shortfall negative
+        // for any app with windows on two workspaces, which silently
+        // disables the whole check for most of a real desktop.
+        let displayFrames = displays.map(\.frame)
+        let onScreen = SpaceProbe.onScreenWindowsByPID().compactMapValues { rects -> [CGRect]? in
+            let onDisplay = rects.filter { !StashPlanner.looksStashed($0, displays: displayFrames) }
+            return onDisplay.isEmpty ? nil : onDisplay
+        }
         // No information — an API failure must never read as "every window
         // left the Space" (invariant 1).
         guard !onScreen.isEmpty else { return }
@@ -1223,16 +1234,24 @@ final class TilingEngine {
 
     func paletteWindows() -> [PaletteWindow] {
         windows.values.compactMap { mw in
-            guard !mw.minimized else { return nil }
+            // A window on another Space stays listed. Activating its app is
+            // what takes the user there, the same route native-fullscreen
+            // windows are summoned by (§4.4) — dropping them would make the
+            // palette the one place that cannot reach them. Genuinely
+            // minimized windows, and windows of an app the user hid, stay
+            // out: those are states the user chose and can undo directly.
+            let offSpace = mw.withdrawnFor.contains(.offSpace)
+            guard !mw.withdrawnFor.contains(.minimized),
+                  !mw.withdrawnFor.contains(.appHidden) else { return nil }
             let ws = model.workspace(containing: mw.id)
-            guard ws != nil || mw.fullscreen else { return nil }
+            guard ws != nil || mw.fullscreen || offSpace else { return nil }
             let running = NSRunningApplication(processIdentifier: mw.pid)
             return PaletteWindow(
                 id: mw.id,
                 title: mw.title,
                 app: running?.localizedName ?? mw.bundleID ?? "?",
                 bundleID: mw.bundleID ?? "",
-                workspace: ws?.id,
+                workspace: ws?.id ?? (offSpace ? mw.suspendedWorkspace : nil),
                 icon: running?.icon
             )
         }
