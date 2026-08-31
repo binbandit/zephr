@@ -257,3 +257,65 @@ struct SolverDegenerateRectTests {
         #expect(CGRect.infinite.isFinite, "the !isInfinite clause exists precisely because this is true")
     }
 }
+
+@Suite("Learned per-window minimums")
+struct LearnedMinimumTests {
+
+    private let screen = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+
+    /// An app that will not shrink past a width should be given it, rather
+    /// than asked for less on every solve — repeatedly asking is what made
+    /// an ordinary app look like it refused to tile.
+    @Test func aLearnedMinimumIsHonoured() {
+        let s = Workspace(id: 1)
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.normalize()
+        // Squeeze w1 well below the minimum it will later claim.
+        _ = s.resize(w1, axis: .horizontal, delta: -0.35, minRatio: 0.05)
+
+        let config = LayoutConfig(innerGap: 0, outerGap: 0)
+        let naive = Solver.solve(workspace: s, in: screen, config: config)
+        #expect(naive.placements[w1]!.frame.width < 400)
+
+        let respected = Solver.solve(
+            workspace: s, in: screen, config: config,
+            minimums: [w1: CGSize(width: 400, height: 200)])
+        #expect(respected.placements[w1]!.frame.width >= 399)
+        // The neighbour gives up the difference; nothing overflows.
+        let total = respected.placements[w1]!.frame.width + respected.placements[w2]!.frame.width
+        #expect(abs(total - screen.width) < 2)
+    }
+
+    /// A minimum that cannot be met alongside its siblings degrades the
+    /// container rather than producing overlapping frames.
+    @Test func animpossibleMinimumDegradesToAccordion() {
+        let s = Workspace(id: 1)
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        let result = Solver.solve(
+            workspace: s, in: screen, config: LayoutConfig(innerGap: 0, outerGap: 0),
+            minimums: [w1: CGSize(width: 1500, height: 200)])
+        // Accordion geometry: one expanded child, the rest collapsed to
+        // slivers — rather than three side-by-side tiles that would have to
+        // overlap to satisfy the minimum.
+        let widths = [w1, w2, w3].compactMap { result.placements[$0]?.frame.width }
+        #expect(widths.count == 3)
+        #expect(widths.max()! > screen.width * 0.5, "no child was expanded")
+        #expect(widths.min()! < 100, "no child was collapsed to a sliver")
+    }
+
+    /// A container inherits the largest minimum inside it, so a nested
+    /// window's floor is not silently lost a level up.
+    @Test func aNestedMinimumRaisesItsContainer() {
+        let s = Workspace(id: 1)
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        _ = s.joinWith(w2, direction: s.root.orientation == .horizontal ? .right : .down)
+
+        let result = Solver.solve(
+            workspace: s, in: screen, config: LayoutConfig(innerGap: 0, outerGap: 0),
+            minimums: [w3: CGSize(width: 700, height: 200)])
+        #expect(result.placements[w3]!.frame.width >= 699)
+    }
+}
