@@ -23,4 +23,27 @@ if [ ! -S "$SOCK" ]; then
     exit 1
 fi
 
-printf '%s\n' "$*" | /usr/bin/nc -U "$SOCK"
+# Transport: perl, not nc. macOS `nc` quits the moment stdin hits EOF, so it
+# loses a race against any reply the server defers — `doctor` scans off the
+# main actor and answers ~40 ms later, and nc would exit 0 having printed
+# nothing, which looks exactly like a command that worked. perl ships with
+# macOS and `IO::Socket::UNIX` is core.
+#
+# The client deliberately does NOT shut down its write side: the server reads
+# that as EOF and drops the connection, taking any pending async reply with
+# it. It just writes the request and reads until the server half-closes,
+# which is also what lets `subscribe` stream indefinitely.
+if ! command -v perl >/dev/null 2>&1; then
+    echo "zephrctl: needs perl to talk to $SOCK" >&2
+    exit 1
+fi
+
+printf '%s\n' "$*" | perl -MIO::Socket::UNIX -e '
+    my $path = shift;
+    my $sock = IO::Socket::UNIX->new(Peer => $path, Type => SOCK_STREAM())
+        or die "zephrctl: cannot connect to $path: $!\n";
+    my $request = do { local $/; <STDIN> };
+    print {$sock} $request;
+    $| = 1;                 # stream `subscribe` line by line
+    print while <$sock>;
+' "$SOCK"

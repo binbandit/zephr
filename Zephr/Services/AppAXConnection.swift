@@ -288,8 +288,11 @@ actor AppAXConnection {
     /// broken. Setting `kAXFrontmost` on the application element is the
     /// public-API path that is not subject to that arbitration.
     ///
-    /// The read-back is the point: focus is the one command that must never
-    /// fail silently, so the caller gets a verdict it can retry on.
+    /// Returns whether the AX writes were accepted. Whether the app truly
+    /// came forward is the caller's to check on the main actor: reading
+    /// `kAXFrontmost` back here still reports the pre-activation value,
+    /// because activation completes asynchronously in the target app — so
+    /// the read-back said "failed" for focus changes that visibly worked.
     func focus(_ id: WindowID) -> Bool {
         guard let el = windows[id], !isDegraded else { return false }
         let madeMain = el.set(kAXMainAttribute, to: kCFBooleanTrue)
@@ -299,7 +302,7 @@ actor AppAXConnection {
             noteTimeout()
             return false
         }
-        return app.bool(kAXFrontmostAttribute) == true
+        return madeMain || raised || fronted
     }
 
     // MARK: - Audit (reconciliation input, §6.4)

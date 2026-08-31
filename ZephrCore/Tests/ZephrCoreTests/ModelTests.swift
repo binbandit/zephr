@@ -233,3 +233,53 @@ struct StashTests {
         #expect(!StashPlanner.looksStashed(win, displays: [laptop]))
     }
 }
+
+@Suite("Stash placement hides windows in a corner")
+struct StashCornerTests {
+
+    private let display = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+
+    /// The bug this replaced: a window pushed straight down left a
+    /// full-width strip visible along the bottom of the screen. macOS
+    /// clamps vertical displacement to keep a title bar reachable, so the
+    /// stash has to move the window off *sideways* as well.
+    @Test func aStashedWindowIsPushedOffHorizontally() {
+        let window = CGRect(x: 8, y: 47, width: 884, height: 1025)
+        let stashed = StashPlanner.stashFrame(for: window, on: display, allDisplays: [display])
+        #expect(stashed.minX >= display.maxX - StashPlanner.sliver
+                || stashed.maxX <= display.minX + StashPlanner.sliver,
+                "stash must leave the display horizontally, not only downwards")
+    }
+
+    /// Whatever corner is chosen, almost none of the window may remain on
+    /// the display — and `looksStashed` must agree, since crash recovery
+    /// uses it to decide what to rescue.
+    @Test(arguments: [
+        CGRect(x: 8, y: 47, width: 884, height: 1025),
+        CGRect(x: 900, y: 47, width: 442, height: 1025),
+        CGRect(x: 0, y: 0, width: 1800, height: 1169),   // full-screen window
+        CGRect(x: 0, y: 0, width: 200, height: 120),     // small window
+    ])
+    func almostNothingOfAStashedWindowStaysOnScreen(_ window: CGRect) {
+        let stashed = StashPlanner.stashFrame(for: window, on: display, allDisplays: [display])
+        let onScreen = stashed.intersection(display)
+        let visible = onScreen.isNull ? 0 : onScreen.width * onScreen.height
+        #expect(visible <= StashPlanner.sliver * StashPlanner.sliver + 0.01,
+                "\(visible)pt² of \(window.size) still visible at \(stashed.origin)")
+        #expect(StashPlanner.looksStashed(stashed, displays: [display]))
+    }
+
+    /// Even if macOS clamps the vertical part of the move back onto the
+    /// display, the horizontal displacement alone must keep the window
+    /// essentially invisible — that is what makes the corner robust.
+    @Test func aClampedVerticalMoveStillHidesTheWindow() {
+        let window = CGRect(x: 8, y: 47, width: 884, height: 1025)
+        let stashed = StashPlanner.stashFrame(for: window, on: display, allDisplays: [display])
+        // Simulate the OS refusing to move it below the display at all.
+        let clamped = CGRect(x: stashed.minX, y: 47, width: stashed.width, height: stashed.height)
+        let onScreen = clamped.intersection(display)
+        let visible = onScreen.isNull ? 0 : onScreen.width * onScreen.height
+        #expect(visible <= StashPlanner.sliver * display.height + 0.01,
+                "a vertically-clamped stash still showed \(visible)pt²")
+    }
+}

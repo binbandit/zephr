@@ -1181,15 +1181,22 @@ final class TilingEngine {
         reapplyForFocusDependentLayout(id)
         syncAppState()
         Task {
-            if await conn.focus(id) { return }
-            // Not frontmost yet. Cooperative activation can decline while
-            // another app is mid-transition, so ask AppKit too and give the
-            // app one beat to come forward before a single retry — better
-            // than dropping the command the whole product is built on.
+            _ = await conn.focus(id)
+            // Verify against the real frontmost app, not an AX read-back:
+            // activation completes asynchronously inside the target, so
+            // `kAXFrontmost` still reads false here even when it worked.
+            // Cooperative activation can also decline outright while another
+            // app is mid-transition, which is what the retry is for — losing
+            // a focus command silently is the worst failure this product
+            // has, so it is worth one extra round trip to be sure.
+            try? await Task.sleep(for: .milliseconds(80))
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier != mw.pid
+            else { return }
             NSRunningApplication(processIdentifier: mw.pid)?.activate()
-            try? await Task.sleep(for: .milliseconds(60))
-            if await conn.focus(id) { return }
-            Self.log.warning("focus did not take for window \(id.raw) (pid \(mw.pid))")
+            try? await Task.sleep(for: .milliseconds(150))
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier != mw.pid {
+                Self.log.warning("focus did not take for window \(id.raw) (pid \(mw.pid))")
+            }
         }
     }
 

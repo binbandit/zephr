@@ -24,24 +24,41 @@ public enum StashPlanner {
         let others = allDisplays.filter { $0 != displayFrame }
         let size = windowFrame.size
 
-        // Candidate origins, best first: below, right, left.
+        // Corners, not edges. Pushing a window straight down leaves a
+        // full-width strip of it across the bottom of the screen: macOS
+        // clamps how far below a display a window may sit — it keeps the
+        // title bar reachable — so "one point past the bottom edge" is not
+        // past it at all, and the request lands tens of points short.
+        //
+        // Horizontal displacement has no such clamp, so a corner works.
+        // The window goes mostly off to the side *and* down; even if the
+        // vertical part is clamped back, all that can show is a
+        // sliver-wide column at the very edge. (Same conclusion AeroSpace
+        // reached: it hides into the bottom-left or bottom-right corner.)
         var candidates: [CGRect] = []
 
-        // South: top sliver row remains at the display's bottom edge.
+        // South-east: only the top-left sliver stays on the display, and
+        // the body hangs off to the right.
         candidates.append(CGRect(
-            x: min(max(windowFrame.origin.x, displayFrame.minX), displayFrame.maxX - size.width),
+            x: displayFrame.maxX - sliver,
             y: displayFrame.maxY - sliver,
             width: size.width, height: size.height
         ))
-        // East: left sliver column remains at the display's right edge.
+        // South-west: mirrored, body hanging off to the left.
+        candidates.append(CGRect(
+            x: displayFrame.minX + sliver - size.width,
+            y: displayFrame.maxY - sliver,
+            width: size.width, height: size.height
+        ))
+        // Due east / west, for arrangements where both bottom corners
+        // border another display but a side is still free.
         candidates.append(CGRect(
             x: displayFrame.maxX - sliver,
             y: min(max(windowFrame.origin.y, displayFrame.minY), max(displayFrame.minY, displayFrame.maxY - size.height)),
             width: size.width, height: size.height
         ))
-        // West: right sliver column remains at the display's left edge.
         candidates.append(CGRect(
-            x: displayFrame.minX - size.width + sliver,
+            x: displayFrame.minX + sliver - size.width,
             y: min(max(windowFrame.origin.y, displayFrame.minY), max(displayFrame.minY, displayFrame.maxY - size.height)),
             width: size.width, height: size.height
         ))
