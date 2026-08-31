@@ -115,6 +115,19 @@ on-workspace-changed = []     # shell commands; $ZEPHR_WORKSPACE is set</code></
 </table></div>
 <p><strong>Even without rules</strong>, structural heuristics float dialogs, sheets, modals, non-resizable windows, and windows smaller than 500×350; launchers (Raycast, Alfred, Spotlight) and system chrome are ignored; native-fullscreen windows are left to macOS.</p>
 
+<h2 id="bind"><a class="anchor" href="#bind">[[bind]]</a></h2>
+<p>Rebind any key. Add one <code>[[bind]]</code> block per key; they are checked before the preset, so you can override a single key without redefining the rest of the keymap.</p>
+<pre><code>[[bind]]
+key = "ctrl-alt-b"       # a chord, or "leader b" for the leader layer
+command = "balance"</code></pre>
+<div class="tablewrap"><table>
+<tr><th>Key</th><th>Meaning</th></tr>
+<tr><td><code>key</code></td><td>A chord such as <code>ctrl-alt-b</code> (<code>ctrl</code>/<code>alt</code>/<code>cmd</code>/<code>shift</code>, at least one of the first three), or <code>leader b</code> / <code>leader shift-b</code> for a key inside the leader layer.</td></tr>
+<tr><td><code>command</code></td><td>The same vocabulary <code>zephrctl</code> speaks &mdash; anything you can run from the shell you can bind.</td></tr>
+</table></div>
+<p>Commands: <code>focus left|down|up|right</code>, <code>move &lt;dir&gt;</code>, <code>resize &lt;dir&gt; [fine]</code>, <code>workspace N</code>, <code>send-to-workspace N</code>, <code>summon N</code>, <code>toggle-float</code>, <code>monocle</code>, <code>balance</code>, <code>rescue</code>, <code>close</code>, <code>cycle-layout</code>, <code>flatten</code>, <code>group [dir]</code>, <code>layout [row|column]</code>, <code>split h|v</code>, <code>float-mode</code>, <code>pause</code>, <code>pause-display</code>, <code>next-display</code>, <code>move-to-display [dir]</code>, <code>move-workspace-to-display [dir]</code>, <code>shrink</code>, <code>grow</code>.</p>
+<p>A chord must carry a modifier: binding a bare letter would swallow that key in every app, which a config file should not be able to do by accident. A binding that cannot be understood is skipped with a warning naming the line, and the rest of the file still applies.</p>
+
 <h2 id="callbacks"><a class="anchor" href="#callbacks">[callbacks]</a></h2>
 <div class="tablewrap"><table>
 <tr><th>Key</th><th>Meaning</th></tr>

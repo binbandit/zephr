@@ -59,6 +59,9 @@ public struct ParsedConfig: Sendable, Equatable {
     public var defaultLayout: ContainerLayout = .tiles
     public var keyPreset: String = "default"
     public var userRules: [WindowRule] = []
+    /// Key bindings from `[[bind]]`, checked before the preset's defaults so
+    /// a user can override any key without redefining the rest.
+    public var bindings: [KeyBinding] = []
     public var onWorkspaceChanged: [String] = []
     /// Optional workspace names ([workspaces] 4 = "chat").
     public var workspaceNames: [Int: String] = [:]
@@ -123,18 +126,31 @@ public enum ConfigFile {
     # title = "^Preferences"      # title regex — case-insensitive, matches anywhere; anchor with ^/$
     # action = "float"            # float | tile | ignore | workspace N
 
+    # Rebind any key. `command` is the same vocabulary zephrctl speaks, so
+    # anything you can run from the shell you can bind here.
+    # [[bind]]
+    # key = "ctrl-alt-b"          # a chord, or "leader b" for the layer
+    # command = "balance"         # focus left · workspace 3 · summon 2 · ...
+
     [callbacks]
     on-workspace-changed = []     # shell commands; $ZEPHR_WORKSPACE is set
     """
 
     private enum Section {
-        case root, layout, keys, callbacks, workspaces, rule(Int), unknown(String)
+        case root, layout, keys, callbacks, workspaces, rule(Int), bind(Int), unknown(String)
     }
 
     public static func parse(_ text: String) throws -> ParsedConfig {
         var config = ParsedConfig()
         var section = Section.root
         var rules: [PartialRule] = []
+
+        struct PartialBind {
+            var key: String?
+            var command: String?
+            var headerLine: Int
+        }
+        var binds: [PartialBind] = []
 
         struct PartialRule {
             var app: String?
@@ -161,6 +177,9 @@ public enum ConfigFile {
                 if name == "rules" {
                     rules.append(PartialRule(headerLine: lineNumber))
                     section = .rule(rules.count - 1)
+                } else if name == "bind" {
+                    binds.append(PartialBind(headerLine: lineNumber))
+                    section = .bind(binds.count - 1)
                 } else {
                     config.warnings.append("line \(lineNumber): unknown table [[\(name)]]")
                     section = .unknown(name)
@@ -210,6 +229,7 @@ public enum ConfigFile {
             case .callbacks: sectionID = "callbacks"
             case .workspaces: sectionID = "workspaces"
             case .rule(let idx): sectionID = "rules#\(idx)"
+            case .bind(let idx): sectionID = "bind#\(idx)"
             case .unknown: sectionID = nil
             }
             if let sectionID {
@@ -340,6 +360,14 @@ public enum ConfigFile {
                     config.warnings.append(unknownKey(key, in: "rules", line: lineNumber))
                 }
 
+            case .bind(let idx):
+                switch key {
+                case "key": binds[idx].key = try string(rawValue, line: lineNumber)
+                case "command": binds[idx].command = try string(rawValue, line: lineNumber)
+                default:
+                    config.warnings.append(unknownKey(key, in: "bind", line: lineNumber))
+                }
+
             case .unknown:
                 break // already warned at the section header
             }
@@ -348,6 +376,34 @@ public enum ConfigFile {
         // Never strand the user with no visible surface at all.
         if !config.showMenuBarIcon && !config.showDockIcon {
             config.warnings.append("menu-bar-icon and dock-icon are both off — reach Zephr via hotkeys, zephrctl, or by editing this file")
+        }
+
+        // Key bindings. A binding that cannot be understood is dropped with
+        // a warning rather than throwing: an unknown command name should not
+        // cost the user every other setting in the same save, and the same
+        // call is already made for an unbindable leader and a bad rule regex.
+        for bind in binds {
+            guard let raw = bind.key, !raw.isEmpty else {
+                config.warnings.append("line \(bind.headerLine): [[bind]] needs a `key` — binding skipped")
+                continue
+            }
+            guard let name = bind.command, !name.isEmpty else {
+                config.warnings.append("line \(bind.headerLine): [[bind]] for \(raw) needs a `command` — binding skipped")
+                continue
+            }
+            guard let (trigger, keyName) = KeyBinding.parseTrigger(raw) else {
+                config.warnings.append("line \(bind.headerLine): `\(raw)` is not a key — use \"leader b\" or a chord like \"ctrl-alt-b\" — binding skipped")
+                continue
+            }
+            guard LeaderBinding.knownKeyNames.contains(keyName) else {
+                config.warnings.append("line \(bind.headerLine): `\(keyName)` is not a bindable key — binding skipped")
+                continue
+            }
+            guard let command = Command.parse(name) else {
+                config.warnings.append("line \(bind.headerLine): `\(name)` is not a command — binding skipped")
+                continue
+            }
+            config.bindings.append(KeyBinding(trigger: trigger, key: keyName, command: command))
         }
 
         for (ordinal, rule) in rules.enumerated() {
