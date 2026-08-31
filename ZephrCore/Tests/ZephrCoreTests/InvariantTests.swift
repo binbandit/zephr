@@ -295,10 +295,10 @@ struct ResizeClampTests {
     @Test func growAgainstASubMinimumNeighborNeverShrinks() throws {
         let ws = try ladder()
         let before = ws.root.children[0].ratio
-        // Grow w1 rightward into w2 (0.02, already below minRatio 0.05):
-        // there is no room, so the request must no-op — the old clamp
-        // inverted it into a shrink.
-        let ok = ws.resize(w1, direction: .right, delta: 0.05, minRatio: 0.05)
+        // w1 grows; its only neighbour w2 is 0.02, already below minRatio
+        // 0.05, so there is no room and the request must no-op — the old
+        // clamp inverted it into a shrink.
+        let ok = ws.resize(w1, axis: .horizontal, delta: 0.05, minRatio: 0.05)
         #expect(!ok)
         #expect(ws.root.children[0].ratio >= before, "grow request shrank the window")
         #expect(ws.root.children[1].ratio == 0.02)
@@ -307,17 +307,23 @@ struct ResizeClampTests {
 
     @Test func growBetweenTwoSubMinimumSiblingsNoOps() throws {
         let ws = try ladder()
-        let ok = ws.resize(w2, direction: .right, delta: 0.05, minRatio: 0.05)
+        // w3 is the one genuinely boxed in: both its neighbours sit at the
+        // floor, so neither can donate and the grow must no-op. (w2 is not
+        // — its previous neighbour is the 0.9 tile, and growing from that
+        // side is exactly what the donor fallback is for.)
+        let ok = ws.resize(w3, axis: .horizontal, delta: 0.05, minRatio: 0.05)
         #expect(!ok)
         #expect(ws.root.children[1].ratio == 0.02)
         #expect(ws.root.children[2].ratio == 0.02)
+        #expect(ws.root.children[3].ratio == 0.02)
         try ws.validate()
     }
 
     @Test func growIntoTheLargeNeighborStillWorks() throws {
         let ws = try ladder()
-        // w2 grows leftward into w1 (0.9): plenty of room, must succeed.
-        let ok = ws.resize(w2, direction: .left, delta: 0.05, minRatio: 0.05)
+        // w2's next sibling is at the floor, so it falls back to w1 (0.9),
+        // which has plenty to give. Growing must still work.
+        let ok = ws.resize(w2, axis: .horizontal, delta: 0.05, minRatio: 0.05)
         #expect(ok)
         #expect(ws.root.children[1].ratio > 0.02)
         #expect(ws.root.children[0].ratio < 0.9)

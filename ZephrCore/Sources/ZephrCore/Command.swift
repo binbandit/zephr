@@ -12,6 +12,15 @@ public enum Command: Sendable, Equatable {
     case toggleMonocle
     case splitPreselect(Orientation)
     case cycleLayout
+    /// Group the focused window with its neighbour in a new container.
+    case joinWith(Direction)
+    /// Reparent every window onto the root — the layout reset.
+    case flatten
+    /// Lay the focused window's container out along this axis.
+    case setOrientation(Orientation)
+    /// Flip the focused window's container between a row and a column. The
+    /// keyboard wants one reversible key; the CLI wants to say which.
+    case toggleOrientation
     case resize(Direction, fine: Bool)
     case shrink
     case grow
@@ -41,6 +50,10 @@ public enum Command: Sendable, Equatable {
         case .toggleMonocle: "Monocle"
         case .splitPreselect(let o): o == .horizontal ? "Split right" : "Split down"
         case .cycleLayout: "Cycle layout"
+        case .joinWith(let d): "Group with \(d.rawValue)"
+        case .flatten: "Flatten layout"
+        case .setOrientation(let o): o == .horizontal ? "Lay out in a row" : "Lay out in a column"
+        case .toggleOrientation: "Row ↔ column"
         case .resize: "Resize"
         case .shrink: "Shrink"
         case .grow: "Grow"

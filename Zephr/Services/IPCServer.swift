@@ -331,6 +331,17 @@ final class IPCServer {
         case "split-h": engine.perform(.splitPreselect(.horizontal)); return ok
         case "split-v": engine.perform(.splitPreselect(.vertical)); return ok
         case "cycle-layout": engine.perform(.cycleLayout); return ok
+        case "group":
+            let dir = parts.dropFirst().first.flatMap(Direction.init(rawValue:)) ?? .right
+            engine.perform(.joinWith(dir)); return ok
+        case "flatten": engine.perform(.flatten); return ok
+        case "layout":
+            switch parts.dropFirst().first {
+            case "row", "horizontal": engine.perform(.setOrientation(.horizontal)); return ok
+            case "column", "vertical": engine.perform(.setOrientation(.vertical)); return ok
+            case nil: engine.perform(.toggleOrientation); return ok
+            default: return bad("layout takes row|column, or nothing to flip")
+            }
         case "next-display": engine.perform(.focusNextDisplay); return ok
         case "float-mode": engine.perform(.toggleWorkspaceFloatMode); return ok
         case "doctor":

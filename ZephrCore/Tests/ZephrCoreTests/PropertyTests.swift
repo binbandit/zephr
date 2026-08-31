@@ -122,7 +122,7 @@ struct PropertyTests {
                    let dir = Direction.allCases.randomElement(using: &rng),
                    let ws = model.workspace(containing: id) {
                     attempted += 1
-                    if ws.resize(id, direction: dir, delta: 0.05, minRatio: 0.05) { succeeded += 1 }
+                    if ws.resize(id, axis: dir.orientation, delta: 0.05, minRatio: 0.05) { succeeded += 1 }
                 }
             case 76..<82: // toggle float
                 if let id = live.randomElement(using: &rng),

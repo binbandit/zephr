@@ -170,9 +170,49 @@ public final class Workspace {
         }
     }
 
-    /// The neighboring window in `direction` from the focused window,
-    /// i3-style: walk up until a container matching the axis has a sibling.
+    /// The neighbouring window in `direction`, tiled or floating.
+    ///
+    /// The tree walk is tried first, so tiled navigation keeps its i3
+    /// semantics and respects nesting. Geometry is the fallback, and it is
+    /// what makes floats reachable at all: they are not in the tree, so the
+    /// walk can neither find one nor start from one. Without it, pressing
+    /// focus-left inside a floating window returned nil, which the engine
+    /// reads as "hit the edge of the display" — so focus jumped to another
+    /// monitor instead of the window sitting right next to it.
     public func neighbor(of id: WindowID, direction: Direction) -> WindowID? {
+        if index[id] != nil, let tiled = treeNeighbor(of: id, direction: direction) {
+            return tiled
+        }
+        return geometricNeighbor(of: id, direction: direction)
+    }
+
+    /// Where a window is right now, tiled or floating.
+    private func currentFrame(_ id: WindowID) -> CGRect? {
+        floating[id] ?? lastSolvedFrames[id]
+    }
+
+    /// Nearest window whose centre lies in `direction` and whose span on the
+    /// other axis overlaps the source — so "left" cannot match something
+    /// diagonally opposite.
+    private func geometricNeighbor(of id: WindowID, direction: Direction) -> WindowID? {
+        guard let from = currentFrame(id) else { return nil }
+        let horizontal = direction.orientation == .horizontal
+        var best: (id: WindowID, distance: CGFloat)?
+        for other in allWindows where other != id {
+            guard let rect = currentFrame(other) else { continue }
+            let advance = horizontal ? rect.midX - from.midX : rect.midY - from.midY
+            guard direction.isForward ? advance > 1 : advance < -1 else { continue }
+            let overlap = horizontal
+                ? min(from.maxY, rect.maxY) - max(from.minY, rect.minY)
+                : min(from.maxX, rect.maxX) - max(from.minX, rect.minX)
+            guard overlap > 1 else { continue }
+            let distance = abs(advance)
+            if best == nil || distance < best!.distance { best = (other, distance) }
+        }
+        return best?.id
+    }
+
+    private func treeNeighbor(of id: WindowID, direction: Direction) -> WindowID? {
         guard let leaf = index[id] else { return nil }
         var node: TreeNode = leaf
         while let parent = node.parent {
@@ -298,10 +338,13 @@ public final class Workspace {
 
     // MARK: - Resize / layout
 
-    /// Moves the boundary the focused window shares with a neighbor in
-    /// `direction` by `delta` (fraction of their common container).
+    /// Moves the boundary the window shares with its neighbour *in
+    /// `direction`* by `delta`. This is the drag gesture: which edge moves
+    /// is chosen by the user's cursor, so unlike `resize` there is a
+    /// specific neighbour and no fallback — let go of a divider that isn't
+    /// there and nothing should happen.
     @discardableResult
-    public func resize(_ id: WindowID, direction: Direction, delta: CGFloat, minRatio: CGFloat) -> Bool {
+    func moveBoundary(_ id: WindowID, direction: Direction, delta: CGFloat, minRatio: CGFloat) -> Bool {
         guard let leaf = index[id] else { return false }
         var node: TreeNode = leaf
         while let parent = node.parent {
@@ -319,6 +362,48 @@ public final class Workspace {
                     neighbor.ratio -= applied
                     return true
                 }
+            }
+            node = parent
+        }
+        return false
+    }
+
+    /// Grows (positive `delta`) or shrinks (negative) the focused window
+    /// along `axis`, taking the difference from a neighbour in the first
+    /// ancestor container laid out on that axis.
+    ///
+    /// The sign is the whole point. The obvious alternative — "move the
+    /// boundary shared with the neighbour in direction X" — makes the same
+    /// key grow a window in the middle of a row and shrink one at its edge,
+    /// because at the edge there is no neighbour in that direction and the
+    /// only thing left to do is the opposite. Nobody can build a mental
+    /// model of a key whose meaning depends on where they are standing.
+    @discardableResult
+    public func resize(_ id: WindowID, axis: Orientation, delta: CGFloat, minRatio: CGFloat) -> Bool {
+        guard let leaf = index[id] else { return false }
+        var node: TreeNode = leaf
+        while let parent = node.parent {
+            if parent.orientation == axis, parent.children.count > 1,
+               let idx = parent.index(of: node) {
+                // Take from the next sibling, falling back to the previous
+                // one when the next has nothing left to give. Trying both is
+                // what lets the last tile in a row grow, and what lets any
+                // tile grow when the neighbour on one side is already at its
+                // minimum.
+                let child = parent.children[idx]
+                for donorIdx in [idx + 1, idx - 1]
+                where parent.children.indices.contains(donorIdx) {
+                    let donor = parent.children[donorIdx]
+                    let applied = Self.clampBracketingZero(
+                        delta,
+                        lower: -(child.ratio - minRatio),
+                        upper: donor.ratio - minRatio)
+                    guard abs(applied) > 0.0001 else { continue }
+                    child.ratio += applied
+                    donor.ratio -= applied
+                    return true
+                }
+                return false
             }
             node = parent
         }
@@ -376,7 +461,7 @@ public final class Workspace {
                     let maxEdge = frames.map { axis == .horizontal ? $0.maxX : $0.maxY }.max()!
                     let extent = maxEdge - minEdge
                     guard extent > 1 else { return false }
-                    return resize(id, direction: direction, delta: deltaPixels / extent, minRatio: minRatio)
+                    return moveBoundary(id, direction: direction, delta: deltaPixels / extent, minRatio: minRatio)
                 }
             }
             node = parent
@@ -408,6 +493,81 @@ public final class Workspace {
         guard let leaf = index[id], let parent = leaf.parent else { return }
         let share = 1 / CGFloat(parent.children.count)
         for c in parent.children { c.ratio = share }
+    }
+
+    /// Groups `id` with its neighbour in `direction` inside a new container
+    /// laid out on the other axis.
+    ///
+    /// This is the only way to build structure out of windows that already
+    /// exist. Without it a nested group can be created solely as a side
+    /// effect of *opening* a window with a preselect set, so "put these two
+    /// side by side" means closing one and reopening it.
+    @discardableResult
+    public func joinWith(_ id: WindowID, direction: Direction) -> Bool {
+        // The direction's axis is a hint, not a requirement: what matters is
+        // which side of *this* container the neighbour sits on. That lets a
+        // single "group with the next one" key work whether the row runs
+        // across or down, which is the difference between a binding people
+        // remember and one they have to think about.
+        guard let leaf = index[id], let parent = leaf.parent,
+              let idx = parent.index(of: leaf)
+        else { return false }
+        let neighborIdx = direction.isForward ? idx + 1 : idx - 1
+        guard parent.children.indices.contains(neighborIdx) else { return false }
+        let neighbor = parent.children[neighborIdx]
+
+        // The group takes the space the pair already occupied, and lies on
+        // the opposite axis so it reads as a visible regrouping — and so
+        // `normalize` does not immediately splice it back out.
+        let group = TreeNode(container: parent.orientation.flipped, layout: parent.layout)
+        group.ratio = leaf.ratio + neighbor.ratio
+        let first = min(idx, neighborIdx)
+        let ordered = idx < neighborIdx ? [leaf, neighbor] : [neighbor, leaf]
+        for child in ordered { parent.removeChild(child) }
+        parent.insertChild(group, at: min(first, parent.children.count))
+        for (offset, child) in ordered.enumerated() {
+            child.ratio = 0.5
+            child.parent = group
+            group.children.insert(child, at: offset)
+        }
+        normalize()
+        focus(id)
+        return true
+    }
+
+    /// Reparents every window directly onto the root at equal shares — the
+    /// layout reset button, for when a tree has been nested into a shape
+    /// that is quicker to abandon than to unpick.
+    public func flatten() {
+        let ids = root.windowIDs()
+        guard !ids.isEmpty else { return }
+        let keepFocus = focusedWindow
+        root.children = []
+        index.removeAll()
+        for id in ids {
+            let leaf = TreeNode(window: id)
+            leaf.parent = root
+            root.children.append(leaf)
+            index[id] = leaf
+        }
+        root.layout = .tiles
+        root.renormalizeRatios()
+        normalize()
+        if let keepFocus, contains(keepFocus) { focus(keepFocus) }
+    }
+
+    /// Lays the focused window's container out along `orientation`.
+    /// Complements `cycleLayout`, which changes tiles/accordion but never
+    /// the axis — so a row of columns could not be turned into a column of
+    /// rows without moving every window by hand.
+    @discardableResult
+    public func setOrientation(_ id: WindowID, _ orientation: Orientation) -> Bool {
+        guard let leaf = index[id], let parent = leaf.parent,
+              parent.orientation != orientation else { return false }
+        parent.orientation = orientation
+        normalize()
+        focus(id)
+        return true
     }
 
     /// Toggles tiles ↔ accordion on the focused window's container, then
