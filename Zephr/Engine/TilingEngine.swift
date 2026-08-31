@@ -718,10 +718,25 @@ final class TilingEngine {
                 return
             }
             Task {
-                let listed = await conn.listedWindowIDs()
-                // Before the removal, while the dead tab still holds its slot:
-                // that is what the promoted sibling pairs with and inherits.
-                if let listed { self.reconcileTabs(pid: pid, listed: listed) }
+                // macOS promotes the next tab a moment *after* it reports the
+                // closed one destroyed, so the app's window list is not yet
+                // accurate on this notification - the sibling is not in it and
+                // there is nothing to pair with. Removing now would collapse
+                // the slot and reflow the workspace, which is exactly the jump
+                // §4.3 says must not happen when a tab closes.
+                //
+                // So hold the dead tab's slot until the sibling appears, then
+                // swap and remove in one turn. Holding it is invisible: the
+                // slot's frame is where the physical window already is, and
+                // the promoted tab is that same window.
+                for attempt in 0..<12 {
+                    if let listed = await conn.listedWindowIDs() {
+                        self.reconcileTabs(pid: pid, listed: listed)
+                        // The swap took the slot away from the dead tab.
+                        if self.model.workspace(containing: id) == nil { break }
+                    }
+                    if attempt < 11 { try? await Task.sleep(for: .milliseconds(25)) }
+                }
                 self.removeWindow(id)
             }
 
@@ -786,31 +801,40 @@ final class TilingEngine {
     /// Native macOS tabs (§4.3). Ghostty, Finder, Safari and Terminal merge
     /// tabbed windows into one physical window, but every tab remains its own
     /// AXWindow: opening one fires `windowCreated`, and the tab switched away
-    /// from is never destroyed. Tiling each of them gave a single window three
-    /// slots - the visible tab was squeezed into a fraction of the display and
-    /// the rest of it showed wallpaper.
+    /// from is never destroyed. Tiling each of them gives a single window
+    /// several slots - the visible tab squeezed into a fraction of the display
+    /// with wallpaper beside it.
     ///
-    /// The readable "tab group" signal §4.3 asks for is the app's own window
-    /// list: macOS drops a background tab from `kAXWindowsAttribute` while
-    /// keeping its element alive, so what the app lists is what is really on
-    /// screen.
+    /// macOS drops a background tab from `kAXWindowsAttribute` while keeping
+    /// its element alive, which is the readable "tab group" signal §4.3 asks
+    /// for. But absence from that list is **not** on its own grounds to take a
+    /// window out of the layout: the read races every tab transition, and
+    /// acting on a list that is merely incomplete withdraws a window the user
+    /// is looking at (invariant 1). So a tab leaving is only ever acted on
+    /// together with the tab that takes its place:
     ///
-    /// Withdrawing the old tab and restoring the new one is not enough, and
-    /// this is the part that matters: restoring runs placement again, so the
-    /// window lands wherever the split policy puts it and the workspace
-    /// reflows because the user clicked a tab. Instead the two are **paired**
-    /// and swapped in place, which is what makes a tab group a single leaf.
-    /// Pairing is by frame - two tabs of one window group share it, two
-    /// separate windows of the same app do not.
+    /// - **Paired** (the common case, and the only one that fires on a
+    ///   keystroke): one window leaves the list as another enters, and they
+    ///   are swapped in place with `replaceWindow`. The node keeps its slot,
+    ///   ratio and focus, so nothing reflows - which is the whole point. A
+    ///   remove-then-insert would re-run placement and move the window.
+    /// - **Duplicate** (audit only, and only with fresh AX frames in hand):
+    ///   two managed windows of one app reporting the same frame are two tabs
+    ///   of one window, so the one the app no longer lists is withdrawn. This
+    ///   is the backstop that collects a ghost tile left by a raced pairing,
+    ///   and it needs positive evidence rather than an absence.
     ///
-    /// Returns true when `adopting` was placed by taking over a slot, so the
-    /// caller knows not to insert it again.
+    /// Returns true when `adopting` took over a slot, so the caller knows not
+    /// to place it again.
     @discardableResult
-    private func reconcileTabs(pid: pid_t, listed: Set<WindowID>, adopting: WindowID? = nil) -> Bool {
-        // Never conclude from a wholesale disappearance. An app that answers
-        // with an empty list is the §6.3 failure mode, not an app whose every
-        // window turned into a background tab - the same call `SpaceMembership`
-        // makes, and for the same reason (invariant 1).
+    private func reconcileTabs(
+        pid: pid_t,
+        listed: Set<WindowID>,
+        frames: [WindowID: CGRect]? = nil,
+        adopting: WindowID? = nil
+    ) -> Bool {
+        // An app that answers with an empty list is the §6.3 failure mode, not
+        // an app whose every window became a background tab.
         guard !listed.isEmpty else { return false }
 
         var leaving: [WindowID] = []
@@ -818,8 +842,8 @@ final class TilingEngine {
         for (id, mw) in windows where mw.pid == pid {
             let inTree = model.workspace(containing: id) != nil
             if listed.contains(id) {
-                // Held out for another reason as well (minimized, hidden) is
-                // not this pass's business to lift.
+                // Held out for another reason too (minimized, hidden) is not
+                // this pass's business to lift.
                 if !inTree, mw.withdrawnFor == [.backgroundTab] { entering.append(id) }
             } else if inTree {
                 leaving.append(id)
@@ -830,18 +854,11 @@ final class TilingEngine {
         var placedAdoptee = false
         var changed = false
 
-        for out in leaving {
-            guard let outFrame = windows[out]?.lastVisibleFrame,
-                  let slot = entering.firstIndex(where: {
-                      guard let f = windows[$0]?.lastVisibleFrame else { return false }
-                      return f.approximatelyEquals(outFrame, tolerance: 4)
-                  })
-            else { continue }
-            let incoming = entering.remove(at: slot)
+        func swap(_ out: WindowID, _ incoming: WindowID) {
             // Captured before the swap: afterwards `out` is no longer placed,
-            // and it needs somewhere to return to if it is selected again.
+            // and it needs somewhere to return to when its tab is selected.
             let home = model.workspace(containing: out)?.id
-            guard model.replaceWindow(out, with: incoming) else { continue }
+            guard model.replaceWindow(out, with: incoming) else { return }
             windows[out]?.withdrawnFor.insert(.backgroundTab)
             windows[out]?.minimized = true
             windows[out]?.suspendedWorkspace = home
@@ -852,12 +869,41 @@ final class TilingEngine {
             changed = true
         }
 
-        // Anything left over is not a tab swap: a tab dragged out into its own
-        // window, or a window that genuinely came or went.
-        for out in leaving where model.workspace(containing: out) != nil {
-            withdraw(out, reason: .backgroundTab)
-            changed = true
+        // Frame first: it tells two tabbed windows of one app apart. A tab
+        // just created has not been placed yet and can still report a stale
+        // frame, so an unambiguous leftover is paired by position afterwards.
+        var unpaired: [WindowID] = []
+        for out in leaving {
+            let outFrame = frames?[out] ?? windows[out]?.lastVisibleFrame
+            if let outFrame, let slot = entering.firstIndex(where: {
+                guard let f = frames?[$0] ?? windows[$0]?.lastVisibleFrame else { return false }
+                return f.approximatelyEquals(outFrame, tolerance: 4)
+            }) {
+                swap(out, entering.remove(at: slot))
+            } else {
+                unpaired.append(out)
+            }
         }
+        if unpaired.count == 1 && entering.count == 1 {
+            swap(unpaired.removeFirst(), entering.removeFirst())
+        }
+
+        // Whatever is still leaving keeps its slot unless another window of
+        // the same app is demonstrably the same physical window.
+        if let frames {
+            for out in unpaired {
+                guard let outFrame = frames[out],
+                      windows.contains(where: { id, mw in
+                          mw.pid == pid && id != out && listed.contains(id)
+                              && frames[id]?.approximatelyEquals(outFrame, tolerance: 4) == true
+                      })
+                else { continue }
+                withdraw(out, reason: .backgroundTab)
+                changed = true
+            }
+        }
+
+        // A tab dragged out into its own window comes back as an ordinary one.
         for incoming in entering where incoming != adopting {
             restore(incoming, reason: .backgroundTab)
             changed = true
@@ -2494,7 +2540,9 @@ final class TilingEngine {
         // Native tabs (§4.3). Safe here without an `unresponsive` guard:
         // `listed` is only populated by an audit that completed without a
         // timeout, and is nil otherwise.
-        if let listed = result.listed { reconcileTabs(pid: pid, listed: listed) }
+        if let listed = result.listed {
+            reconcileTabs(pid: pid, listed: listed, frames: result.frames)
+        }
 
         // Missed miniaturize/deminiaturize notifications (§6.4): drive the
         // same transitions as the handlers, or the window stays excluded
