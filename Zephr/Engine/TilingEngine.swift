@@ -73,6 +73,18 @@ final class TilingEngine {
     private(set) var connections: [pid_t: AppAXConnection] = [:]
     /// Apps *we* hid for the stash — never touch apps the user hid (⌘H).
     private var hiddenApps: Set<pid_t> = []
+    /// The frame each window had before Zephr ever touched it, keyed by the
+    /// AX element so it survives re-adoption.
+    ///
+    /// Adoption is not a once-per-window event: a spurious destroy
+    /// notification, a pid that momentarily stops resolving, or the audit's
+    /// unknown-window sweep all re-adopt a window that is already laid out —
+    /// and capturing `originalFrame` from *that* snapshot silently replaces
+    /// the user's real geometry with a tile. Quit then "restores" windows to
+    /// where the layout already had them, which looks exactly like restore
+    /// being broken.
+    private var originalFrames: [AXElement: CGRect] = [:]
+
     /// Pids with an in-flight `maybeHideApp` probe.
     private var hideProbesInFlight: Set<pid_t> = []
     private var displays: [DisplayInfo] = []
@@ -436,6 +448,7 @@ final class TilingEngine {
         for mw in managed {
             windows.removeValue(forKey: mw.id)
             model.removeWindow(mw.id)
+            originalFrames.removeValue(forKey: mw.element)
         }
         if !managed.isEmpty { applyAll() }
     }
@@ -491,10 +504,12 @@ final class TilingEngine {
         // in the palette (marked) and re-tiles when it leaves fullscreen (§6.4).
         if snap.fullscreen {
             lastAdoptionAt = ContinuousClock.now
+            let original = originalFrames[element] ?? snap.frame
+            originalFrames[element] = original
             windows[id] = ManagedWindow(
                 id: id, pid: pid, bundleID: conn.bundleID, element: element,
                 title: snap.title, floating: false, fullscreen: true,
-                lastVisibleFrame: snap.frame, originalFrame: snap.frame
+                lastVisibleFrame: snap.frame, originalFrame: original
             )
             hub.watchWindow(pid: pid, element: element, id: id)
             return
@@ -543,10 +558,12 @@ final class TilingEngine {
         }
 
         lastAdoptionAt = ContinuousClock.now
+        let original = originalFrames[element] ?? snap.frame
+        originalFrames[element] = original
         windows[id] = ManagedWindow(
             id: id, pid: pid, bundleID: conn.bundleID, element: element,
             title: snap.title, floating: floats, minimized: snap.minimized,
-            fullscreen: false, lastVisibleFrame: snap.frame, originalFrame: snap.frame
+            fullscreen: false, lastVisibleFrame: snap.frame, originalFrame: original
         )
         // Record *why* it is out of the layout, not just that it is —
         // `restore` lifts a named reason, so a window adopted while already
