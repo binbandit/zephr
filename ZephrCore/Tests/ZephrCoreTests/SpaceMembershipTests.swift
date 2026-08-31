@@ -20,12 +20,32 @@ struct SpaceMembershipTests {
     }
 
     /// The whole point: an app whose window is on another Space contributes
-    /// nothing to the on-screen list.
+    /// nothing to the on-screen list. A second window that *is* present is
+    /// what distinguishes this from the user simply switching Space.
     @Test func aWindowOnAnotherSpaceIsAbsent() {
         let missing = SpaceMembership.absent(
-            candidates: [.init(id: a, pid: pidOne, frame: rect(0, 0))],
-            onScreenByPID: [pidTwo: [rect(0, 0)]])
+            candidates: [
+                .init(id: a, pid: pidOne, frame: rect(0, 0)),
+                .init(id: b, pid: pidTwo, frame: rect(900, 0)),
+            ],
+            onScreenByPID: [pidTwo: [rect(900, 0)]])
         #expect(missing == [a])
+    }
+
+    /// Switching to a Space none of the managed windows live on must change
+    /// nothing. Withdrawing them all would tear the layout out of the tree
+    /// and rebuild a different one on the way back — and entering native
+    /// fullscreen looks identical, because macOS gives the fullscreen
+    /// window its own Space.
+    @Test func aSpaceSwitchAwayWithdrawsNothing() {
+        let missing = SpaceMembership.absent(
+            candidates: [
+                .init(id: a, pid: pidOne, frame: rect(0, 0)),
+                .init(id: b, pid: pidOne, frame: rect(900, 0)),
+                .init(id: c, pid: pidTwo, frame: rect(0, 700)),
+            ],
+            onScreenByPID: [:])
+        #expect(missing.isEmpty)
     }
 
     /// Apps settle a few points off the frame we asked for; that is
@@ -77,14 +97,14 @@ struct SpaceMembershipTests {
         #expect(missing.isEmpty)
     }
 
-    /// An empty probe means the API told us nothing, not that every window
-    /// vanished. The caller refuses to act on it, but the pure function
-    /// still has to report honestly.
-    @Test func anEmptyProbeMarksEverythingAbsent() {
+    /// An empty probe means the API told us nothing. Nothing may be
+    /// withdrawn on the strength of it — the caller also refuses to act,
+    /// but the guarantee belongs here too.
+    @Test func anEmptyProbeWithdrawsNothing() {
         let missing = SpaceMembership.absent(
             candidates: [.init(id: a, pid: pidOne, frame: rect(0, 0))],
             onScreenByPID: [:])
-        #expect(missing == [a])
+        #expect(missing.isEmpty)
     }
 
     @Test func noCandidatesMeansNothingAbsent() {
@@ -117,12 +137,15 @@ struct SpaceMembershipCountGateTests {
     /// Only as many windows as are actually missing may be blamed, even
     /// when several frames fail to match.
     @Test func blameIsCappedAtTheShortfall() {
+        // A third window elsewhere is present, so this is a migration and
+        // not a Space switch; pidOne is short by one.
         let missing = SpaceMembership.absent(
             candidates: [
                 .init(id: a, pid: pidOne, frame: rect(0)),
                 .init(id: b, pid: pidOne, frame: rect(900)),
+                .init(id: WindowID(9), pid: 200, frame: rect(0)),
             ],
-            onScreenByPID: [pidOne: [rect(4000)]])  // one live window, neither frame matches
+            onScreenByPID: [pidOne: [rect(4000)], 200: [rect(0)]])
         #expect(missing.count == 1)
         #expect(missing == [a], "lowest id is blamed, deterministically")
     }
