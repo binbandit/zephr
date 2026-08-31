@@ -136,6 +136,39 @@ final class HotkeyService {
         }
     }
 
+    /// User bindings from `[[bind]]`, consulted before the preset's own
+    /// tables so any single key can be overridden without having to redefine
+    /// the rest of the keymap.
+    private var userBindings: [KeyBinding] = []
+
+    func setBindings(_ bindings: [KeyBinding]) {
+        userBindings = bindings
+    }
+
+    /// A user binding matching this chord, if any.
+    private func userChord(keyCode: Int64, mods: Modifiers) -> Command? {
+        for binding in userBindings {
+            guard case .chord(let control, let option, let command, let shift) = binding.trigger,
+                  mods == Modifiers(control: control, option: option, shift: shift, command: command),
+                  LeaderBinding.keyCodesByName[binding.key] == keyCode
+            else { continue }
+            return binding.command
+        }
+        return nil
+    }
+
+    /// A user binding for a key pressed inside the leader layer.
+    private func userLayerKey(keyCode: Int64, mods: Modifiers) -> Command? {
+        for binding in userBindings {
+            guard case .leader(let shift) = binding.trigger,
+                  shift == mods.shift,
+                  LeaderBinding.keyCodesByName[binding.key] == keyCode
+            else { continue }
+            return binding.command
+        }
+        return nil
+    }
+
     /// Applies a leader binding from config. Returns false (keeping the
     /// current leader) when the key name is unknown.
     @discardableResult
@@ -424,6 +457,12 @@ final class HotkeyService {
 
     /// Direct chords: ⌃⌥ and ⌃⌥⇧ by default; presets remap (§4.2).
     private func handleChord(keyCode: Int64, mods: Modifiers) -> Bool {
+        // User bindings first: a rebind is worth nothing if the built-in
+        // table answers ahead of it.
+        if let command = userChord(keyCode: keyCode, mods: mods) {
+            onCommand?(command)
+            return true
+        }
         if mods == chordMods {
             if let dir = direction(for: keyCode) { onCommand?(.focus(dir)); return true }
             if let n = workspaceNumber(for: keyCode) { onCommand?(.goToWorkspace(n)); return true }
@@ -472,6 +511,12 @@ final class HotkeyService {
     private func handleLayerKey(keyCode: Int64, mods: Modifiers) {
         if keyCode == Key.escape { state = .inactive; return }
         guard !mods.command, !mods.control else { return }
+
+        if let command = userLayerKey(keyCode: keyCode, mods: mods) {
+            onCommand?(command)
+            layerCommandIssued()
+            return
+        }
 
         if let dir = direction(for: keyCode) {
             let command: Command = mods.shift ? .move(dir) : .focus(dir)

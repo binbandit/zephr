@@ -230,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.engine.applyConfig(parsed)
             self?.hotkeys.setLeader(parsed.leader)
             self?.hotkeys.setPreset(parsed.keyPreset)
+            self?.hotkeys.setBindings(parsed.bindings)
             self?.hotkeys.configureLayer(
                 oneShot: parsed.layerOneShot,
                 timeout: TimeInterval(parsed.layerTimeout)
