@@ -1,15 +1,28 @@
 import AppKit
 import ZephrCore
 
-/// The focused-window border (§4.3): a 2 pt accent-colored rounded outline
-/// drawn by a click-through overlay window — the clearest cue for where
-/// focus is while learning. Config: `[layout] focus-border`.
+/// The focused-window border (§4.3): a rounded outline drawn by a
+/// click-through overlay window — the clearest cue for where focus is while
+/// learning. Config: the `focus-border*` keys in `[layout]`.
 @MainActor
 final class FocusBorderController {
 
-    var enabled = true {
-        didSet { if !enabled { window.orderOut(nil) } }
+    /// Appearance from the config. Assigning re-paints, so a hot reload
+    /// takes effect on the border already on screen.
+    var style = FocusBorderStyle.default {
+        didSet {
+            guard style != oldValue else { return }
+            if !style.enabled { window.orderOut(nil) }
+            applyStyle()
+        }
     }
+
+    /// Alpha the accent color is drawn at when the config names no color.
+    /// At full strength an accent outline reads as window chrome rather than
+    /// a focus hint; a configured color is drawn exactly as written, alpha
+    /// and all. Not private — Settings seeds its color well from this so the
+    /// two agree on what "accent" looks like.
+    static let accentAlpha: CGFloat = 0.55
 
     /// The system's window corner radius. macOS 26 rounded windows
     /// considerably more than earlier releases, so the pre-Tahoe 10 pt
@@ -19,10 +32,31 @@ final class FocusBorderController {
     }
 
     /// How far outside the window the stroke sits, so it never covers
-    /// content. The outline's radius has to grow by the same amount or the
+    /// content. Derived from the width so a thicker border still clears the
+    /// window by the same 1 pt instead of creeping inward over it; at the
+    /// default 2 pt this is the 3 pt the border has always used.
+    private var outset: CGFloat { style.width + 1 }
+
+    /// The outline's radius has to exceed the window's by the outset or the
     /// curve stops being concentric with the window's own — the corners
-    /// pinch in while the straight edges stay parallel.
-    private static let outset: CGFloat = 3
+    /// pinch in while the straight edges stay parallel. A configured radius
+    /// is the outline's own, so `0` really is square.
+    private var cornerRadius: CGFloat {
+        style.cornerRadius ?? Self.systemWindowCornerRadius + outset
+    }
+
+    private var color: NSColor {
+        guard let color = style.color else {
+            return .controlAccentColor.withAlphaComponent(Self.accentAlpha)
+        }
+        // sRGB: that is what a hex literal means everywhere else it is typed.
+        return NSColor(
+            srgbRed: CGFloat(color.red),
+            green: CGFloat(color.green),
+            blue: CGFloat(color.blue),
+            alpha: CGFloat(color.alpha)
+        )
+    }
 
     private let window: NSWindow
     private let borderView: NSView
@@ -30,8 +64,6 @@ final class FocusBorderController {
     init() {
         borderView = NSView()
         borderView.wantsLayer = true
-        borderView.layer?.borderWidth = 2
-        borderView.layer?.cornerRadius = Self.systemWindowCornerRadius + Self.outset
         // macOS window corners are squircles, not circular arcs.
         borderView.layer?.cornerCurve = .continuous
         borderView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -49,6 +81,14 @@ final class FocusBorderController {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         window.contentView = borderView
+
+        applyStyle()
+    }
+
+    private func applyStyle() {
+        borderView.layer?.borderWidth = style.width
+        borderView.layer?.cornerRadius = cornerRadius
+        borderView.layer?.borderColor = color.cgColor
     }
 
     /// `frame` is the focused window's frame in global CG coordinates
@@ -58,18 +98,21 @@ final class FocusBorderController {
         // paused must not resurrect the border — the user paused precisely
         // to stop overlays (presentations, screen sharing).
         let paused = AppDelegate.shared?.appState.paused ?? false
-        guard enabled, !paused, let frame else {
+        guard style.enabled, !paused, let frame else {
             window.orderOut(nil)
             return
         }
         guard let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.screens.first else {
             return
         }
-        let outlined = frame.insetBy(dx: -Self.outset, dy: -Self.outset)
+        let outlined = frame.insetBy(dx: -outset, dy: -outset)
         let cocoa = globalToCocoa(outlined, primaryDisplayHeight: primary.frame.height)
 
-        borderView.layer?.borderColor = NSColor.controlAccentColor
-            .withAlphaComponent(0.55).cgColor
+        // Re-resolved every time: `controlAccentColor` is dynamic, and a
+        // layer stores the flattened CGColor it was handed, so the border
+        // would otherwise keep whichever accent was current when the config
+        // last changed.
+        borderView.layer?.borderColor = color.cgColor
         window.setFrame(cocoa, display: true)
         window.orderFrontRegardless()
     }

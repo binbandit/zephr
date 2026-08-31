@@ -138,6 +138,12 @@ final class PaletteController {
         for n in 1...9 {
             entries.append(.workspace(n))
         }
+        // Only worth offering with somewhere to summon *from*.
+        if engine.displays.count > 1 {
+            for n in 1...9 {
+                entries.append(.command(.summonWorkspace(n), keys: ""))
+            }
+        }
         // §4.2: chord hints follow the active key preset; vim (no chords)
         // falls back to the leader-layer keys.
         func chord(_ key: String, shift: Bool = false, orLeader leader: String) -> String {

@@ -360,6 +360,11 @@ final class IPCServer {
         case "move-to-display":
             let dir = parts.dropFirst().first.flatMap(Direction.init(rawValue:))
             engine.perform(.moveWindowToDisplay(dir)); return ok
+        case "summon":
+            guard let n = parts.dropFirst().first.flatMap(Int.init), (1...9).contains(n) else {
+                return bad("summon needs a workspace 1-9")
+            }
+            engine.perform(.summonWorkspace(n)); return ok
         case "move-workspace-to-display":
             let dir = parts.dropFirst().first.flatMap(Direction.init(rawValue:))
             engine.perform(.moveWorkspaceToDisplay(dir)); return ok
@@ -400,8 +405,22 @@ final class IPCServer {
             }
             return "[\(items.joined(separator: ","))]"
         case "list-workspaces":
-            let items = engine.model.workspaces.values.sorted { $0.id < $1.id }.map {
-                #"{"id":\#($0.id),"name":\#(jsonString($0.name ?? "")),"windows":\#($0.allWindows.count),"focused":\#(engine.model.focusedWorkspace?.id == $0.id)}"#
+            // `display` and `visible` are what make a multi-monitor layout
+            // debuggable at all: which screen a workspace belongs to, and
+            // whether it is the one that screen is currently showing.
+            let items = engine.model.workspaces.values.sorted { $0.id < $1.id }.map { ws -> String in
+                let display = ws.homeDisplay.map { "\($0.raw)" } ?? ""
+                let visible = ws.homeDisplay.map { engine.model.activeWorkspaceByDisplay[$0] == ws.id } ?? false
+                return #"{"id":\#(ws.id),"name":\#(jsonString(ws.name ?? "")),"windows":\#(ws.allWindows.count),"display":\#(jsonString(display)),"visible":\#(visible),"focused":\#(engine.model.focusedWorkspace?.id == ws.id)}"#
+            }
+            return "[\(items.joined(separator: ","))]"
+
+        case "list-displays":
+            let focused = engine.model.focusedDisplay
+            let items = engine.displays.map { info -> String in
+                let active = engine.model.activeWorkspaceByDisplay[info.id].map(String.init) ?? "null"
+                let f = info.frame
+                return #"{"id":\#(jsonString("\(info.id.raw)")),"frame":[\#(Int(f.minX)),\#(Int(f.minY)),\#(Int(f.width)),\#(Int(f.height))],"workspace":\#(active),"focused":\#(info.id == focused),"paused":\#(engine.isPaused(display: info.id))}"#
             }
             return "[\(items.joined(separator: ","))]"
         default:

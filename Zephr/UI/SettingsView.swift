@@ -43,6 +43,36 @@ private struct CommittingSlider: View {
     }
 }
 
+/// A color well that previews live and writes once the user settles.
+///
+/// `ColorPicker` has no counterpart to `Slider`'s `onEditingChanged`: the
+/// system color panel drives the binding continuously while the wheel is
+/// dragged, which is the same per-step config rewrite `CommittingSlider`
+/// exists to avoid. A short quiet period is the closest thing to a release
+/// event the API offers. The setter runs only for real edits, so seeding
+/// still cannot write.
+private struct CommittingColorWell: View {
+    let title: String
+    @Binding var value: Color
+    let commit: (Color) -> Void
+    @State private var pending: Task<Void, Never>?
+
+    var body: some View {
+        ColorPicker(title, selection: Binding(
+            get: { value },
+            set: { color in
+                value = color
+                pending?.cancel()
+                pending = Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    guard !Task.isCancelled else { return }
+                    commit(color)
+                }
+            }
+        ), supportsOpacity: true)
+    }
+}
+
 struct SettingsView: View {
     var body: some View {
         TabView {
@@ -269,9 +299,27 @@ private struct LayoutSettings: View {
     @State private var gaps: Double = 8
     @State private var accordionPadding: Double = 48
     @State private var focusBorder = true
+    @State private var borderFollowsAccent = true
+    @State private var borderColor = Color.accentColor
+    @State private var borderWidth: Double = 2
     @State private var defaultLayout = "tiles"
 
     private var config: ConfigService? { AppDelegate.shared?.configService }
+
+    /// SwiftUI's `Color` in the sRGB terms the config file speaks. The
+    /// conversion cannot fail for a color the picker produced, but a `nil`
+    /// component space would trap on `redComponent`, so it degrades to the
+    /// accent keyword rather than risking that on a control panel.
+    private static func configValue(for color: Color) -> String {
+        guard let srgb = NSColor(color).usingColorSpace(.sRGB) else { return "\"accent\"" }
+        let rgba = RGBAColor(
+            red: srgb.redComponent,
+            green: srgb.greenComponent,
+            blue: srgb.blueComponent,
+            alpha: srgb.alphaComponent
+        )
+        return "\"\(rgba.hexString)\""
+    }
 
     var body: some View {
         Form {
@@ -291,6 +339,29 @@ private struct LayoutSettings: View {
                 config?.setValue(section: "layout", key: "focus-border", value: $0 ? "true" : "false")
             })
 
+            // The keyword rather than a hex: the accent color is a live
+            // System Settings choice, and freezing today's value into the
+            // config would quietly stop the border following it.
+            Toggle("Border follows the system accent color", isOn: writeThrough($borderFollowsAccent) {
+                config?.setValue(
+                    section: "layout", key: "focus-border-color",
+                    value: $0 ? "\"accent\"" : Self.configValue(for: borderColor)
+                )
+            })
+            .disabled(!focusBorder)
+
+            CommittingColorWell(title: "Border color:", value: $borderColor) {
+                config?.setValue(section: "layout", key: "focus-border-color", value: Self.configValue(for: $0))
+            }
+            .disabled(!focusBorder || borderFollowsAccent)
+
+            CommittingSlider(
+                value: $borderWidth, range: 1...8, step: 1,
+                label: { "Border thickness: \(Int($0)) pt" },
+                commit: { config?.setValue(section: "layout", key: "focus-border-width", value: "\(Int($0))") }
+            )
+            .disabled(!focusBorder)
+
             Picker("New workspaces start as:", selection: writeThrough($defaultLayout) {
                 config?.setValue(section: "layout", key: "default", value: "\"\($0)\"")
             }) {
@@ -303,7 +374,16 @@ private struct LayoutSettings: View {
             guard let current = config?.current else { return }
             gaps = Double(current.layout.innerGap)
             accordionPadding = Double(current.layout.accordionPadding)
-            focusBorder = current.focusBorder
+            let border = current.focusBorder
+            focusBorder = border.enabled
+            borderFollowsAccent = border.color == nil
+            borderWidth = Double(border.width)
+            // Seeding the accent case at the alpha the border actually
+            // paints, so turning the toggle off is a visual no-op instead of
+            // jumping to a full-strength outline.
+            borderColor = border.color.map {
+                Color(.sRGB, red: $0.red, green: $0.green, blue: $0.blue, opacity: $0.alpha)
+            } ?? Color(nsColor: .controlAccentColor.withAlphaComponent(FocusBorderController.accentAlpha))
             defaultLayout = current.defaultLayout.rawValue
         }
     }

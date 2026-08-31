@@ -31,6 +31,14 @@ public enum Command: Sendable, Equatable {
     case moveWindowToDisplay(Direction?)
     /// Send the whole current workspace to another display.
     case moveWorkspaceToDisplay(Direction?)
+    /// Bring a workspace *here*, to the focused display.
+    ///
+    /// The counterpart to `goToWorkspace`, which goes to wherever the
+    /// workspace already lives and takes your focus with it. On one display
+    /// they are the same thing; on two they are opposites, and having only
+    /// the first is why picking a workspace can feel like it changed the
+    /// wrong screen.
+    case summonWorkspace(Int)
     case closeWindow
     case toggleWorkspaceFloatMode
     case togglePause
@@ -68,6 +76,7 @@ public enum Command: Sendable, Equatable {
         case .focusNextDisplay: "Next display"
         case .moveWindowToDisplay(let d): d.map { "Send window \($0.rawValue)" } ?? "Send window to next display"
         case .moveWorkspaceToDisplay(let d): d.map { "Send workspace \($0.rawValue)" } ?? "Send workspace to next display"
+        case .summonWorkspace(let n): "Bring workspace \(n) here"
         case .closeWindow: "Close window"
         case .toggleWorkspaceFloatMode: "Workspace float mode"
         case .togglePause: "Pause / resume Zephr"

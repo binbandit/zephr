@@ -23,7 +23,7 @@
 <p class="lead"><code>~/.config/zephr/config.toml</code> — written with commented defaults on first run, hot-reloaded the moment you save. Every value is optional; an empty file is a complete configuration.</p>
 
 <ul>
-  <li><strong>Syntax errors surface immediately:</strong> a typo shows in the menu bar with its line number ("line 7: expected true or false"), and unknown keys get a <em>did-you-mean</em> suggestion. A broken file never takes window management down — Zephr keeps the last good config. An unrecognized <code>leader</code> key name is rejected the same way, naming the keys you can bind.</li>
+  <li><strong>Syntax errors surface immediately:</strong> a typo shows in the menu bar with its line number ("line 7: expected true or false"), and unknown keys get a <em>did-you-mean</em> suggestion. A broken file never takes window management down — Zephr keeps the last good config. An unrecognized <code>leader</code> key name is rejected the same way, naming the keys you can bind. Purely cosmetic values — the <code>focus-border-*</code> keys — warn and fall back to their default instead of holding the file back, so a mistyped color never costs you the other edits in the same save.</li>
   <li><strong>The Settings window edits this same file</strong>, changing only the keys you touch. Comments, ordering, and formatting survive — safe to keep in your dotfiles.</li>
 </ul>
 
@@ -38,6 +38,9 @@ dock-icon = false             # menu-bar app by default
 gaps = 8                      # points between windows and screen edges
 accordion-padding = 48        # collapsed sliver width in accordion layout
 focus-border = true           # accent border on the focused window
+focus-border-color = "accent" # "accent", or a hex: "#7AA2F7" / "#7AA2F7CC"
+focus-border-width = 2        # outline thickness in points
+focus-border-radius = 19      # outline corner radius; 0 for square corners
 default = "tiles"             # tiles | accordion for new workspaces
 
 [keys]
@@ -80,7 +83,10 @@ on-workspace-changed = []     # shell commands; $ZEPHR_WORKSPACE is set</code></
 <tr><td><code>gaps</code></td><td><code>8</code></td><td>Points between windows and screen edges (0–100). Sets both inner and outer.</td></tr>
 <tr><td><code>inner-gaps</code> / <code>outer-gaps</code></td><td>—</td><td>Override the two independently.</td></tr>
 <tr><td><code>accordion-padding</code></td><td><code>48</code></td><td>Sliver width for collapsed accordion siblings (2–400).</td></tr>
-<tr><td><code>focus-border</code></td><td><code>true</code></td><td>2&nbsp;pt accent-colored outline on the focused window.</td></tr>
+<tr><td><code>focus-border</code></td><td><code>true</code></td><td>Draw an outline on the focused window at all.</td></tr>
+<tr><td><code>focus-border-color</code></td><td><code>"accent"</code></td><td><code>"accent"</code> follows your macOS accent color (drawn at 55% opacity, and it keeps following if you change the setting). Otherwise a hex string — <code>#RGB</code>, <code>#RRGGBB</code>, or <code>#RRGGBBAA</code> for alpha — with the <code>#</code> optional and case-insensitive. A hex is drawn exactly as written, so use the <code>AA</code> pair if you want it translucent. Quote it: an unquoted <code>#</code> starts a TOML comment.</td></tr>
+<tr><td><code>focus-border-width</code></td><td><code>2</code></td><td>Outline thickness in points (0.5–20). The outline always sits 1&nbsp;pt outside the window, so a thicker one never covers content.</td></tr>
+<tr><td><code>focus-border-radius</code></td><td>system</td><td>The outline's own corner radius (0–64); <code>0</code> gives square corners. Unset, it tracks the system window radius — 19 on macOS&nbsp;26, 13 before it.</td></tr>
 <tr><td><code>default</code></td><td><code>"tiles"</code></td><td>Layout new workspaces start in: <code>tiles</code> or <code>accordion</code>.</td></tr>
 </table></div>
 
