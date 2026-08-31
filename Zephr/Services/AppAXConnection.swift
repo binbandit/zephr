@@ -153,6 +153,36 @@ actor AppAXConnection {
         return snapshot(el)
     }
 
+    /// What a geometry notification actually is: where the window sits now,
+    /// and whether it just entered native fullscreen.
+    struct Geometry: Sendable {
+        var frame: CGRect
+        var fullscreen: Bool
+    }
+
+    /// Reads `id`'s frame, and `AXFullScreen` only when that frame covers a
+    /// whole display.
+    ///
+    /// Entering native fullscreen arrives as an ordinary resize (§6.4), so
+    /// the engine has to be able to tell the two apart on the event itself
+    /// rather than waiting for the audit. Filling a display is the cheap
+    /// discriminator - a tile never does (the menu bar alone keeps it out of
+    /// `frame`), a fullscreen window always does - so the ordinary path
+    /// costs one AX read and only the suspicious case pays for a second
+    /// (§6.3).
+    func geometry(of id: WindowID, fullscreenIfFilling displays: [CGRect]) -> Geometry? {
+        guard let el = windows[id] else { return nil }
+        guard let frame = el.frame else {
+            // Busy is not gone (§6.3): feed the retry ladder, report nothing.
+            if el.liveness == .unresponsive { noteTimeout() }
+            return nil
+        }
+        guard displays.contains(where: { frame.approximatelyEquals($0, tolerance: 2) }) else {
+            return Geometry(frame: frame, fullscreen: false)
+        }
+        return Geometry(frame: frame, fullscreen: (el.attribute("AXFullScreen") as? Bool) ?? false)
+    }
+
     func focusedWindowElement() -> AXElement? {
         guard let el = app.element(kAXFocusedWindowAttribute) else { return nil }
         el.setMessagingTimeout(AXElement.messagingDeadline)   // §6.3
