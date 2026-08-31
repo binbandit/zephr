@@ -173,8 +173,9 @@ struct CommandStripView: View {
             Text("RESIZE")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.orange)
-            group("Adjust 5%", keys: [("h j k l", nil)])
-            group("Fine 1%", keys: [("⇧ + hjkl", nil)])
+            group("Bigger", keys: [("l  j", nil)])
+            group("Smaller", keys: [("h  k", nil)])
+            group("Fine", keys: [("⇧ + key", nil)])
             group("Back", keys: [("esc", nil)])
         }
     }
@@ -185,9 +186,11 @@ struct CommandStripView: View {
             GridRow { sheetItem("⇧ H J K L", "Move window"); sheetItem("m", "Monocle") }
             GridRow { sheetItem("1–9", "Go to workspace"); sheetItem("s / v", "Split right / down") }
             GridRow { sheetItem("⇧ 1–9", "Send to workspace"); sheetItem("space", "Tiles ↔ accordion") }
-            GridRow { sheetItem("r", "Resize mode"); sheetItem("=", "Balance sizes") }
+            GridRow { sheetItem("r", "Resize: l/j bigger, h/k smaller"); sheetItem("=", "Balance sizes") }
             GridRow { sheetItem("q", "Close window"); sheetItem("p", "Palette") }
             GridRow { sheetItem("tab", "Next display"); sheetItem("w", "Rescue all windows") }
+            GridRow { sheetItem("g", "Group with next"); sheetItem("⇧ G", "Ungroup everything") }
+            GridRow { sheetItem("o", "Row ↔ column"); sheetItem("", "") }
             GridRow {
                 sheetItem("esc / leader", "Close layer")
                 // §4.2: the hint tracks the active preset; vim has no chords.

@@ -76,6 +76,7 @@ final class HotkeyService {
         static let h: Int64 = 4, j: Int64 = 38, k: Int64 = 40, l: Int64 = 37
         static let t: Int64 = 17, m: Int64 = 46, s: Int64 = 1, v: Int64 = 9
         static let r: Int64 = 15, w: Int64 = 13, p: Int64 = 35, q: Int64 = 12
+        static let g: Int64 = 5, o: Int64 = 31
         static let space: Int64 = 49, tab: Int64 = 48, escape: Int64 = 53
         static let equals: Int64 = 24, minus: Int64 = 27, grave: Int64 = 50
         static let slash: Int64 = 44
@@ -490,6 +491,10 @@ final class HotkeyService {
         case Key.s: onCommand?(.splitPreselect(.horizontal)); layerCommandIssued()
         case Key.v: onCommand?(.splitPreselect(.vertical)); layerCommandIssued()
         case Key.space: onCommand?(.cycleLayout); layerCommandIssued()
+        // g / ⇧G are a pair: group these two, or ungroup everything.
+        case Key.g where mods.shift: onCommand?(.flatten); layerCommandIssued()
+        case Key.g: onCommand?(.joinWith(.right)); layerCommandIssued()
+        case Key.o: onCommand?(.toggleOrientation); layerCommandIssued()
         case Key.equals: onCommand?(.balance); layerCommandIssued()
         case Key.r: state = .resize
         case Key.p:

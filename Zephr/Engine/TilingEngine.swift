@@ -1086,14 +1086,38 @@ final class TilingEngine {
             ws.cycleLayout(f)
             applyAll()
 
+        case .joinWith(let dir):
+            guard let ws = model.focusedWorkspace, let f = ws.focusedWindow else { return }
+            if ws.joinWith(f, direction: dir) { applyAll() }
+
+        case .flatten:
+            guard let ws = model.focusedWorkspace else { return }
+            ws.flatten()
+            applyAll()
+
+        case .setOrientation(let orientation):
+            guard let ws = model.focusedWorkspace, let f = ws.focusedWindow else { return }
+            if ws.setOrientation(f, orientation) { applyAll() }
+
+        case .toggleOrientation:
+            guard let ws = model.focusedWorkspace, let f = ws.focusedWindow,
+                  let parent = ws.node(for: f)?.parent else { return }
+            if ws.setOrientation(f, parent.orientation.flipped) { applyAll() }
+
         case .resize(let dir, let fine):
             guard let ws = model.focusedWorkspace, let f = ws.focusedWindow else { return }
             let step = fine ? config.resizeStepFine : config.resizeStep
-            // Push the window's edge in `dir`; at a hard edge, pull the
-            // opposite boundary instead so the key always does something.
-            if !ws.resize(f, direction: dir, delta: step, minRatio: config.minRatio) {
-                _ = ws.resize(f, direction: dir.opposite, delta: -step, minRatio: config.minRatio)
-            }
+            // The direction says where the window's far edge goes: right and
+            // down make it bigger, left and up smaller. One rule, and it
+            // reads the same wherever the window sits.
+            //
+            // The old shape pushed a named *boundary* and, at a hard edge,
+            // pulled the opposite one "so the key always does something" —
+            // which made the same key grow a window in the middle of a row
+            // and shrink one at its end. Doing nothing is better than doing
+            // the opposite of what was asked.
+            let delta = dir.isForward ? step : -step
+            ws.resize(f, axis: dir.orientation, delta: delta, minRatio: config.minRatio)
             applyAll()
 
         case .shrink, .grow:

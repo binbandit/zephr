@@ -41,6 +41,9 @@
 <tr><td><kbd>p</kbd></td><td>Open the palette</td><td><kbd>⌃⌥P</kbd></td></tr>
 <tr><td><kbd>q</kbd></td><td>Close focused window</td><td><kbd>⌃⌥Q</kbd></td></tr>
 <tr><td><kbd>w</kbd></td><td>Rescue all windows to current workspace</td><td>—</td></tr>
+<tr><td><kbd>g</kbd></td><td>Group the focused window with the next one</td><td>&mdash;</td></tr>
+<tr><td><kbd>⇧ G</kbd></td><td>Ungroup everything &mdash; flatten the workspace</td><td>&mdash;</td></tr>
+<tr><td><kbd>o</kbd></td><td>Flip the group between a row and a column</td><td>&mdash;</td></tr>
 <tr><td><kbd>tab</kbd></td><td>Focus next display</td><td><kbd>⌃⌥`</kbd></td></tr>
 <tr><td><kbd>?</kbd></td><td>Full cheat sheet</td><td>—</td></tr>
 <tr><td><kbd>esc</kbd> / leader</td><td>Close the layer</td><td>—</td></tr>
@@ -50,11 +53,12 @@
 <p>Leader <kbd>r</kbd>, then:</p>
 <div class="tablewrap"><table>
 <tr><th>Key</th><th>Action</th></tr>
-<tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> or arrows</td><td>Push the focused window's edge in that direction, 5% steps</td></tr>
-<tr><td><kbd>⇧</kbd> + direction</td><td>Fine steps (1%)</td></tr>
+<tr><td><kbd>l</kbd> or <kbd>→</kbd> &middot; <kbd>j</kbd> or <kbd>↓</kbd></td><td>Bigger &mdash; wider, taller. 5% steps</td></tr>
+<tr><td><kbd>h</kbd> or <kbd>←</kbd> &middot; <kbd>k</kbd> or <kbd>↑</kbd></td><td>Smaller &mdash; narrower, shorter</td></tr>
+<tr><td><kbd>⇧</kbd> + any of those</td><td>Fine steps (1%)</td></tr>
 <tr><td><kbd>esc</kbd> or <kbd>r</kbd></td><td>Back to the layer</td></tr>
 </table></div>
-<p>At a hard edge the opposite boundary moves instead, so the key always does something sensible.</p>
+<p>The direction is where the window's far edge goes: right and down grow it, left and up shrink it. That holds wherever the window sits &mdash; a tile at the end of a row grows by taking from the neighbour behind it rather than reversing on you.</p>
 
 <h2 id="presets"><a class="anchor" href="#presets">Chord presets</a></h2>
 <p>The chord modifier is a preset — set <code>preset</code> under <code>[keys]</code> or pick it in Settings. The leader layer is identical in all of them.</p>
