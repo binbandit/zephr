@@ -42,11 +42,15 @@ final class TilingEngine {
         var title: String
         var floating: Bool
         var minimized: Bool = false
-        /// Withdrawn because the user hid the whole app (⌘H), rather than
-        /// minimizing this window. Tracked separately because AX still
-        /// reports the window as un-minimized, so the audit would otherwise
-        /// put it straight back into the layout.
-        var appHidden: Bool = false
+        /// Why this window is out of the layout, if it is.
+        ///
+        /// The reasons stack: an app the user hides while one of its windows
+        /// already sits on another Space has two, and lifting either one
+        /// alone must not bring the window back. Only `.minimized` is
+        /// something AX reports — for the other two the window describes
+        /// itself as perfectly ordinary, which is why the audit cannot be
+        /// left to decide on its own.
+        var withdrawnFor: Set<WithdrawReason> = []
         /// Native fullscreen: unmanaged but palette-listed (§6.4).
         var fullscreen: Bool = false
         var lastAppliedFrame: CGRect?
@@ -159,6 +163,13 @@ final class TilingEngine {
             guard let pid = app?.processIdentifier else { return }
             MainActor.assumeIsolated { TilingEngine.shared?.detachApp(pid: pid) }
         }
+        // Switching native Space moves windows out from under us with no AX
+        // notification at all (§6.4). Debounced past the transition, which
+        // animates for a few hundred ms and reports a half-settled window
+        // list while it does.
+        workspaceNC.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { TilingEngine.shared?.scheduleSpaceReconcile() }
+        }
         // ⌘H (§6.4): an app's windows leave the screen without a single AX
         // notification, so without this the layout holds tiles for windows
         // nobody can see until the app comes back.
@@ -195,6 +206,10 @@ final class TilingEngine {
                 if !idle || tick % 10 == 0 {
                     self.audit()
                 }
+                // Backstop for a missed Space notification. The deep sweep
+                // only, so an idle desktop still costs one window-list read
+                // every ~30 s.
+                if tick % 10 == 0 { self.reconcileSpaces() }
             }
         }
 
@@ -510,6 +525,10 @@ final class TilingEngine {
             title: snap.title, floating: floats, minimized: snap.minimized,
             fullscreen: false, lastVisibleFrame: snap.frame, originalFrame: snap.frame
         )
+        // Record *why* it is out of the layout, not just that it is —
+        // `restore` lifts a named reason, so a window adopted while already
+        // minimized would otherwise never be allowed back.
+        if snap.minimized { windows[id]?.withdrawnFor.insert(.minimized) }
         hub.watchWindow(pid: pid, element: element, id: id)
 
         if !snap.minimized {
@@ -549,24 +568,95 @@ final class TilingEngine {
             }
 
         case .windowMiniaturized(let id):
-            noteMinimized(id)
+            withdraw(id, reason: .minimized)
 
         case .windowDeminiaturized(let id):
-            noteDeminiaturized(id)
+            restore(id, reason: .minimized)
         }
+    }
+
+    enum WithdrawReason: Hashable {
+        case minimized      // the user minimized this window
+        case appHidden      // the user hid the whole app (⌘H)
+        case offSpace       // the window is on another native Space
     }
 
     /// Minimize transitions, shared by the notification handlers and the
     /// audit's minimized diff (§6.4). Leaving the tree records the workspace
     /// the window came from so restoring — even days later from the Dock —
     /// puts it back there, not wherever focus happens to be (§4.4).
-    private func noteMinimized(_ id: WindowID) {
-        guard windows[id]?.minimized == false else { return }
+    /// Takes a window out of the layout for `reason`, remembering where it
+    /// was so it can go back. Idempotent per reason, and a no-op when the
+    /// window is already out for a different one.
+    private func withdraw(_ id: WindowID, reason: WithdrawReason) {
+        guard let mw = windows[id], !mw.withdrawnFor.contains(reason) else { return }
+        windows[id]?.withdrawnFor.insert(reason)
+        guard !mw.minimized else { return }   // already out of the tree
         windows[id]?.suspendedWorkspace = model.workspace(containing: id)?.id
         windows[id]?.minimized = true
         model.removeWindow(id)
         applyAll()
         focusModelFallback()
+    }
+
+    /// Lifts one reason. The window only returns once nothing else is
+    /// holding it out — un-hiding an app must not un-minimize the window
+    /// the user minimized inside it.
+    private func restore(_ id: WindowID, reason: WithdrawReason) {
+        guard let mw = windows[id], mw.withdrawnFor.contains(reason) else { return }
+        windows[id]?.withdrawnFor.remove(reason)
+        guard windows[id]?.withdrawnFor.isEmpty == true, mw.minimized else { return }
+        windows[id]?.minimized = false
+        windows[id]?.suspendedWorkspace = nil
+        model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
+        applyAll()
+    }
+
+    /// Coalesces Space reconciles and waits out the transition animation.
+    func scheduleSpaceReconcile() {
+        spaceDebounce?.cancel()
+        spaceDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.reconcileSpaces()
+        }
+    }
+
+    /// Withdraws windows that are on another native Space and brings back
+    /// the ones that returned (§6.4).
+    ///
+    /// Only windows the model currently *shows* are judged. A stashed window
+    /// is parked off-display on purpose and can be missing from the
+    /// on-screen list for that reason alone; judging those would empty every
+    /// inactive workspace at once.
+    ///
+    /// The pass is symmetric on purpose: everything previously withdrawn is
+    /// restored first, then the whole set is judged together. Tracking
+    /// arrivals and departures separately needs two different rules for one
+    /// question, and the coalesced apply means the intermediate state is
+    /// never written to any window.
+    private func reconcileSpaces() {
+        guard !paused else { return }
+        let onScreen = SpaceProbe.onScreenWindowsByPID()
+        // No information — an API failure must never read as "every window
+        // left the Space" (invariant 1).
+        guard !onScreen.isEmpty else { return }
+
+        for id in windows.keys where windows[id]?.withdrawnFor.contains(.offSpace) == true {
+            restore(id, reason: .offSpace)
+        }
+
+        var candidates: [SpaceMembership.Candidate] = []
+        for mw in windows.values
+        where !mw.minimized && !mw.fullscreen && isVisible(mw.id) {
+            candidates.append(.init(
+                id: mw.id,
+                pid: mw.pid,
+                frame: mw.lastSettledFrame ?? mw.lastAppliedFrame ?? mw.lastVisibleFrame))
+        }
+        for id in SpaceMembership.absent(candidates: candidates, onScreenByPID: onScreen) {
+            withdraw(id, reason: .offSpace)
+        }
     }
 
     /// The user hid an app. Withdraw its windows from the layout exactly
@@ -578,25 +668,15 @@ final class TilingEngine {
     /// switched away from.
     func noteAppHidden(pid: pid_t) {
         guard !hiddenApps.contains(pid) else { return }
-        for (id, mw) in windows where mw.pid == pid && !mw.minimized {
-            windows[id]?.appHidden = true
-            noteMinimized(id)
+        for id in windows.keys where windows[id]?.pid == pid {
+            withdraw(id, reason: .appHidden)
         }
     }
 
     func noteAppUnhidden(pid: pid_t) {
-        for (id, mw) in windows where mw.pid == pid && mw.appHidden {
-            windows[id]?.appHidden = false
-            noteDeminiaturized(id)
+        for id in windows.keys where windows[id]?.pid == pid {
+            restore(id, reason: .appHidden)
         }
-    }
-
-    private func noteDeminiaturized(_ id: WindowID) {
-        guard let mw = windows[id], mw.minimized else { return }
-        windows[id]?.minimized = false
-        windows[id]?.suspendedWorkspace = nil
-        model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
-        applyAll()
     }
 
     private func removeWindow(_ id: WindowID) {
@@ -1178,6 +1258,8 @@ final class TilingEngine {
         model.focusedDisplay.flatMap(DisplayService.screen(for:))
     }
 
+    private var spaceDebounce: Task<Void, Never>?
+
     /// Monotonic stamp ordering frame batches; see `applyFrames`.
     private var nextWriteGeneration: UInt64 = 0
 
@@ -1727,14 +1809,15 @@ final class TilingEngine {
         // attribute did not answer is absent from the map and left alone —
         // guessing "not minimized" would hand it a tile it cannot occupy.
         for (id, mw) in windows where mw.pid == pid && !result.unresponsive.contains(id) {
-            // A ⌘H-hidden window still answers `kAXMinimized` with false;
-            // its withdrawal is ours to track, not AX's to contradict.
-            guard !mw.appHidden else { continue }
+            // No guard for the other withdrawal reasons is needed: AX
+            // reports a ⌘H-hidden or off-Space window as un-minimized, and
+            // `restore` simply lifts a reason that was never set, leaving
+            // the real one in place.
             guard let observedMinimized = result.minimized[id] else { continue }
-            if observedMinimized && !mw.minimized {
-                noteMinimized(id)
-            } else if !observedMinimized && mw.minimized {
-                noteDeminiaturized(id)
+            if observedMinimized {
+                withdraw(id, reason: .minimized)
+            } else {
+                restore(id, reason: .minimized)
             }
         }
 

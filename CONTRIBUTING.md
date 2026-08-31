@@ -87,12 +87,28 @@ the MainActor; workspace ids stay in 1–9 and redock returns them to their
 own display (`Workspace.preferredDisplay`); ⌘H withdraws an app's windows
 like a minimize; focus sets `kAXFrontmost` and verifies with one retry.
 
-Known gaps, ranked (see the PR that landed the audit wave for detail):
-Zephr is **not Space-aware** — it manages every window AX reports, including
-windows on another native Space, so mixing Spaces with Zephr workspaces
-leaves empty-looking tiles; ~27 uncoalesced `applyAll()` sites reflow the
-desktop repeatedly at startup; per-pid frame batches can apply out of order
-because separate tasks reach an actor unordered.
+Cleanup wave (Aug 2026): `applyAll()` is coalesced to one solve per
+main-actor turn (28 call sites, several inside per-window loops); frame
+batches carry a generation so an older apply cannot overwrite a newer one;
+the Mission Control drift heuristic is judged across apps rather than per
+pid, where it could never fire; Core owns the single leader key table.
+
+Space-awareness (Aug 2026): `SpaceMembership` in Core decides which managed
+windows are on the Space the user is looking at, from the public
+`CGWindowListCopyWindowInfo(.optionOnScreenOnly, …)` list that `SpaceProbe`
+reads — never from window titles, which would need Screen Recording. A
+window that moved away is withdrawn from the layout and comes back when it
+returns. Withdrawal reasons stack (`ManagedWindow.withdrawnFor`): minimize,
+⌘H and off-Space each hold a window out independently, and lifting one does
+not release the others. **This path has not yet been exercised against a
+real multi-Space desktop** — the matching logic is unit-tested, the probe
+is not.
+
+Known gaps: ~27 `applyAll()` sites still exist as call sites (harmless now
+they coalesce, but the audit loops would read better with an explicit
+invalidate); the write-tracking state on `ManagedWindow`
+(`lastAppliedFrame`, `lastSettledFrame`, `lastVisibleFrame`, `originalFrame`
+plus a parallel `pendingWrites` map) is three concepts wearing four names.
 
 Not yet built (by design or needs credentials): Sparkle + notarization
 pipeline (needs an Apple Developer ID + hosted appcast), lossless TOML
