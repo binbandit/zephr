@@ -256,12 +256,12 @@ struct MoveTests {
 
 @Suite("Resize and layout ops")
 struct ResizeTests {
-    @Test func resizeMovesSharedBoundary() throws {
+    @Test func growingTakesFromANeighbour() throws {
         let s = ws()
         s.insertTiled(w1)
         s.insertTiled(w2)
         s.normalize()
-        #expect(s.resize(w1, direction: .right, delta: 0.05, minRatio: 0.05))
+        #expect(s.resize(w1, axis: .horizontal, delta: 0.05, minRatio: 0.05))
         let ratios = s.root.children.map(\.ratio)
         #expect(abs(ratios[0] - 0.55) < 0.001)
         #expect(abs(ratios[1] - 0.45) < 0.001)
@@ -273,22 +273,49 @@ struct ResizeTests {
         s.insertTiled(w1)
         s.insertTiled(w2)
         s.normalize()
-        #expect(s.resize(w1, direction: .right, delta: 0.9, minRatio: 0.05))
+        #expect(s.resize(w1, axis: .horizontal, delta: 0.9, minRatio: 0.05))
         let ratios = s.root.children.map(\.ratio)
         #expect(ratios[1] >= 0.049)
         try s.validate()
     }
 
-    @Test func resizeAtEdgeFails() throws {
+    /// The bug this replaced: "grow" at the end of a row had no neighbour
+    /// in that direction, so the old code fell back to the opposite one and
+    /// *shrank* the window. Grow must grow wherever the window sits.
+    @Test func growingWorksAtEitherEndOfARow() throws {
+        let s = ws()
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+
+        let firstBefore = s.root.children[0].ratio
+        #expect(s.resize(w1, axis: .horizontal, delta: 0.05, minRatio: 0.05))
+        #expect(s.root.children[0].ratio > firstBefore, "leftmost tile must grow")
+
+        let lastIndex = s.root.children.count - 1
+        let lastBefore = s.root.children[lastIndex].ratio
+        let lastWindow = s.root.children[lastIndex].windowID!
+        #expect(s.resize(lastWindow, axis: .horizontal, delta: 0.05, minRatio: 0.05))
+        #expect(s.root.children[lastIndex].ratio > lastBefore, "rightmost tile must grow too")
+        try s.validate()
+    }
+
+    @Test func shrinkingIsJustANegativeDelta() throws {
         let s = ws()
         s.insertTiled(w1)
         s.insertTiled(w2)
         s.normalize()
-        // No vertical ancestor at all.
-        #expect(!s.resize(w1, direction: .down, delta: 0.05, minRatio: 0.05))
-        // w1 has no left neighbor... but growth toward the right neighbor's
-        // boundary from the left edge is direction .right; .left has none.
-        #expect(!s.resize(w1, direction: .left, delta: 0.05, minRatio: 0.05))
+        #expect(s.resize(w1, axis: .horizontal, delta: -0.05, minRatio: 0.05))
+        #expect(s.root.children[0].ratio < 0.5)
+        try s.validate()
+    }
+
+    @Test func resizeOnAnAxisWithNoContainerFails() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.normalize()
+        // A horizontal row has no vertical ancestor to resize against.
+        #expect(!s.resize(w1, axis: .vertical, delta: 0.05, minRatio: 0.05))
     }
 
     @Test func growShrinkShare() throws {
@@ -307,7 +334,7 @@ struct ResizeTests {
         let s = ws()
         for w in [w1, w2, w3] { s.insertTiled(w) }
         s.normalize()
-        _ = s.resize(w1, direction: .right, delta: 0.2, minRatio: 0.05)
+        _ = s.resize(w1, axis: .horizontal, delta: 0.2, minRatio: 0.05)
         s.balance(w1)
         for c in s.root.children {
             #expect(abs(c.ratio - 1.0 / 3.0) < 0.001)
@@ -347,5 +374,129 @@ struct FloatTests {
         let solved = s.lastSolvedFrames[w2]!
         _ = s.toggleFloat(w2, defaultFrame: .zero)
         #expect(s.floating[w2] == solved)
+    }
+}
+
+@Suite("Directional focus reaches floating windows")
+struct FloatingFocusTests {
+
+    /// Floats are not in the tree, so the i3-style walk can neither find one
+    /// nor start from one. Before the geometric fallback, focusing out of a
+    /// float returned nil — which the engine reads as "hit the display edge"
+    /// and answers by throwing focus to another monitor.
+    @Test func focusLeavesAFloatToTheWindowBesideIt() throws {
+        let s = Workspace(id: 1)
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.normalize()
+        _ = Solver.solve(workspace: s, in: CGRect(x: 0, y: 0, width: 1600, height: 1000))
+
+        // A float parked over the right-hand tile.
+        s.insertFloating(w3, frame: CGRect(x: 900, y: 300, width: 400, height: 300))
+        #expect(s.neighbor(of: w3, direction: .left) == w1, "float could not reach the tile beside it")
+    }
+
+    @Test func aTileCanReachAFloatWhenNoTileLiesThatWay() throws {
+        let s = Workspace(id: 1)
+        s.insertTiled(w1)
+        s.normalize()
+        _ = Solver.solve(workspace: s, in: CGRect(x: 0, y: 0, width: 1600, height: 1000))
+        s.insertFloating(w2, frame: CGRect(x: 1000, y: 300, width: 400, height: 300))
+        #expect(s.neighbor(of: w1, direction: .right) == w2)
+    }
+
+    /// A window diagonally away must not answer a horizontal move.
+    @Test func geometryRequiresOverlapOnTheOtherAxis() throws {
+        let s = Workspace(id: 1)
+        s.insertTiled(w1)
+        s.normalize()
+        _ = Solver.solve(workspace: s, in: CGRect(x: 0, y: 0, width: 400, height: 300))
+        // Far below and to the right: no vertical overlap with w1's band.
+        s.insertFloating(w2, frame: CGRect(x: 900, y: 2000, width: 200, height: 150))
+        #expect(s.neighbor(of: w1, direction: .right) == nil)
+    }
+
+    /// Tiled navigation keeps its tree semantics: a float hovering over a
+    /// tile must not hijack a move that has a real tiled answer.
+    @Test func tiledNavigationStillPrefersTheTree() throws {
+        let s = Workspace(id: 1)
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.normalize()
+        _ = Solver.solve(workspace: s, in: CGRect(x: 0, y: 0, width: 1600, height: 1000))
+        s.insertFloating(w3, frame: CGRect(x: 810, y: 300, width: 200, height: 200))
+        #expect(s.neighbor(of: w1, direction: .right) == w2)
+    }
+}
+
+@Suite("Restructuring windows that already exist")
+struct RestructureTests {
+
+    /// The gap this closes: a nested group could only be created as a side
+    /// effect of *opening* a window with a preselect set, so grouping two
+    /// windows already on screen meant closing one and reopening it.
+    @Test func joinWithGroupsTwoNeighboursOnTheOtherAxis() throws {
+        let s = ws()
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        let axis = s.root.orientation
+
+        #expect(s.joinWith(w1, direction: axis == .horizontal ? .right : .down))
+        try s.validate()
+
+        let group = s.root.children.first { $0.isContainer }
+        #expect(group != nil, "no container was created")
+        #expect(group?.orientation == axis.flipped, "group must lie on the other axis")
+        #expect(Set(group?.windowIDs() ?? []).count == 2)
+        #expect(Set(s.root.windowIDs()) == [w1, w2, w3], "no window may be lost")
+        #expect(s.focusedWindow == w1)
+    }
+
+    @Test func joinWithFailsWithNoNeighbourThatWay() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.normalize()
+        #expect(!s.joinWith(w1, direction: .right))
+        try s.validate()
+    }
+
+    @Test func flattenReparentsEveryWindowOntoTheRoot() throws {
+        let s = ws()
+        for w in [w1, w2, w3] { s.insertTiled(w) }
+        s.normalize()
+        _ = s.joinWith(w1, direction: s.root.orientation == .horizontal ? .right : .down)
+        s.focus(w3)
+
+        s.flatten()
+        try s.validate()
+        let flat = s.root.children.filter(\.isContainer).isEmpty
+        #expect(flat, "a container survived the flatten")
+        #expect(Set(s.root.windowIDs()) == [w1, w2, w3])
+        #expect(s.focusedWindow == w3, "flatten must not move focus")
+        for child in s.root.children {
+            #expect(abs(child.ratio - 1.0 / 3.0) < 0.001)
+        }
+    }
+
+    @Test func flattenOnAnEmptyWorkspaceIsSafe() throws {
+        let s = ws()
+        s.flatten()
+        try s.validate()
+    }
+
+    @Test func setOrientationFlipsTheContainersAxis() throws {
+        let s = ws()
+        s.insertTiled(w1)
+        s.insertTiled(w2)
+        s.normalize()
+        let axis = s.root.orientation
+
+        #expect(s.setOrientation(w1, axis.flipped))
+        try s.validate()
+        #expect(s.root.orientation == axis.flipped)
+        #expect(Set(s.root.windowIDs()) == [w1, w2])
+
+        // Already on that axis: nothing to do.
+        #expect(!s.setOrientation(w1, axis.flipped))
     }
 }

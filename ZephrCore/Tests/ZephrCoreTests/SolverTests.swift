@@ -54,7 +54,7 @@ struct SolverTilesTests {
         s.insertTiled(w1)
         s.insertTiled(w2)
         s.normalize()
-        _ = s.resize(w1, direction: .right, delta: 0.2, minRatio: 0.05) // 0.7 / 0.3
+        _ = s.resize(w1, axis: .horizontal, delta: 0.2, minRatio: 0.05) // 0.7 / 0.3
         let config = LayoutConfig(innerGap: 0, outerGap: 0)
         let result = Solver.solve(workspace: s, in: screen, config: config)
         let f1 = result.placements[w1]!.frame
@@ -67,7 +67,7 @@ struct SolverTilesTests {
         s.insertTiled(w2)
         s.normalize()
         // Squeeze w1 to 5%: min tile width must win.
-        _ = s.resize(w2, direction: .left, delta: 0.45, minRatio: 0.05)
+        _ = s.resize(w1, axis: .horizontal, delta: -0.45, minRatio: 0.05)
         let config = LayoutConfig(innerGap: 0, outerGap: 0, minTileSize: CGSize(width: 200, height: 90))
         let result = Solver.solve(workspace: s, in: screen, config: config)
         #expect(result.placements[w1]!.frame.width >= 199)

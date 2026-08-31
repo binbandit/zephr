@@ -71,7 +71,7 @@ struct ProfileTests {
         m.focusDisplay(d1)
         m.insertWindow(ids[0])
         m.insertWindow(ids[1])
-        _ = m.workspace(containing: ids[0])!.resize(ids[0], direction: .right, delta: 0.15, minRatio: 0.05)
+        _ = m.workspace(containing: ids[0])!.resize(ids[0], axis: .horizontal, delta: 0.15, minRatio: 0.05)
 
         _ = m.activateWorkspace(3)
         m.insertWindow(ids[2])
