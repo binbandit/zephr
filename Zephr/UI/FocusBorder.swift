@@ -79,7 +79,15 @@ final class FocusBorderController {
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        // No `.fullScreenAuxiliary`: that is the explicit opt-in to being
+        // drawn alongside a fullscreen window, and this overlay has no
+        // business on a Space it does not own. It is not the whole story -
+        // `.canJoinAllSpaces` reaches fullscreen Spaces on its own, and the
+        // border has to keep that to survive an ordinary Space switch - so
+        // the engine also refuses to draw over a display a fullscreen window
+        // has taken (see `hasFullscreenWindow`). Removing the opt-in just
+        // stops us asking for the thing we then have to work around.
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.contentView = borderView
 
         applyStyle()

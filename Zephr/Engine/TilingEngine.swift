@@ -780,11 +780,13 @@ final class TilingEngine {
     /// never written to any window.
     private func reconcileSpaces() {
         guard !paused else { return }
-        // A native-fullscreen window sits on its own Space, so while one
-        // exists the on-screen list describes a Space the tiled windows were
-        // never on. `SpaceMembership` refuses a wholesale withdrawal anyway,
-        // but there is nothing useful to learn from the probe here.
-        guard !windows.values.contains(where: { $0.fullscreen }) else { return }
+        // NB: no fullscreen guard. Skipping while any window is fullscreen
+        // looks prudent and is in fact a permanent off switch — somebody
+        // always has something fullscreen, so off-Space windows were never
+        // withdrawn and their tiles stood empty forever. The case that
+        // guard was written for, entering fullscreen making every *other*
+        // window look absent at once, is already handled where it belongs:
+        // `SpaceMembership.absent` refuses a wholesale withdrawal.
         // The lock screen and the screen saver own the display and report
         // almost nothing else on it. Judging window membership against that
         // would be judging against a Space the user cannot even see.
@@ -823,7 +825,10 @@ final class TilingEngine {
                 pid: mw.pid,
                 frame: mw.lastSettledFrame ?? mw.lastAppliedFrame ?? mw.lastVisibleFrame))
         }
-        for id in SpaceMembership.absent(candidates: candidates, onScreenByPID: onScreen) {
+        let absent = SpaceMembership.absent(candidates: candidates, onScreenByPID: onScreen)
+        Self.log.info(
+            "space reconcile: \(candidates.count) visible, \(onScreen.values.reduce(0) { $0 + $1.count }) on screen, \(absent.count) elsewhere")
+        for id in absent {
             withdraw(id, reason: .offSpace)
         }
     }
@@ -868,9 +873,10 @@ final class TilingEngine {
         onEvent?("window_unmanaged", ["window": "\(id.raw)", "app": mw.bundleID ?? ""])
     }
 
-    /// Moved/resized events: our own writes echo back — ignore those. Real
-    /// drift during a mouse drag auto-floats the window (§4.3); anything else
-    /// re-converges to the model via a debounced re-apply.
+    /// Moved/resized events: our own writes echo back - ignore those. A
+    /// title-bar drag auto-floats the window (§4.3), entering native
+    /// fullscreen takes it out of the tree, and anything else re-converges to
+    /// the model via a debounced re-apply.
     private func handleGeometryEvent(_ id: WindowID) {
         if let pending = pendingWrites[id],
            ContinuousClock.now - pending.at < .seconds(1) {
@@ -878,68 +884,142 @@ final class TilingEngine {
         }
         guard !paused else { return }
         guard let mw = windows[id], !mw.minimized,
-              let ws = model.workspace(containing: id) else { return }
+              model.workspace(containing: id) != nil else { return }
 
         // Stashed windows have nothing to track (§4.4): a late echo of our
         // own stash write must never be recorded as the window's real frame —
         // for a float that would bake the off-screen position into the model
         // and, via the next capture, into the saved profile (invariant 1).
         guard isVisible(id) else { return }
+        guard let conn = connections[mw.pid] else { return }
 
-        if ws.isFloating(id) {
-            // Track the float's new frame as its truth.
-            guard let conn = connections[mw.pid] else { return }
-            Task {
-                if let snap = await conn.snapshot(of: id) {
-                    ws.setFloatingFrame(id, frame: snap.frame)
-                    self.windows[id]?.lastVisibleFrame = snap.frame
-                    // The border is drawn from `lastVisibleFrame`, so a
-                    // window that moved or resized leaves it stroked around
-                    // empty desktop — which reads as a blank window sitting
-                    // where the real one used to be, with the real one now
-                    // unmarked.
-                    self.syncAppState()
-                    self.persistSoon()
-                }
-            }
-            return
-        }
+        // Sampled now, on the turn the event arrived: by the time the AX read
+        // below returns the button may have been released, and a real drag
+        // would then look like an app moving its own window.
+        let buttonDown = NSEvent.pressedMouseButtons & 1 != 0
+        // Where the layout physically left the window. The read-back, not
+        // `lastAppliedFrame`: for an app that snaps to its own grid that one
+        // holds the target we asked for rather than the origin the window
+        // actually took (§6.3), and a phantom offset there would read as a
+        // drag.
+        let placed = mw.lastSettledFrame ?? mw.lastVisibleFrame
+        let displayFrames = displays.map(\.frame)
 
-        if NSEvent.pressedMouseButtons & 1 != 0 {
-            // Title-bar drag on a tiled window: float it for the drag and
-            // offer drop targets to re-tile (§4.3) — but only if the cursor
-            // is actually on this window. Apps resize their own windows
-            // during unrelated drags, and floating those would pop the
-            // wrong window out and let dragEnded retile it (§6.4).
-            guard let conn = connections[mw.pid] else { return }
-            Task {
-                guard let snap = await conn.snapshot(of: id) else { return }
-                guard let cursor = self.cursorInGlobalCG(), snap.frame.contains(cursor) else { return }
-                guard let ws = self.model.workspace(containing: id), !ws.isFloating(id) else { return }
-                _ = ws.toggleFloat(id, defaultFrame: snap.frame)
-                ws.setFloatingFrame(id, frame: snap.frame)
-                self.windows[id]?.floating = true
-                self.applyAll()
-                self.beginDragSession(id)
-            }
-            return
-        }
+        Task {
+            guard let observed = await conn.geometry(of: id, fullscreenIfFilling: displayFrames)
+            else { return }
 
-        // App moved itself: snap back to the model.
-        if id == model.focusedWindow {
-            // Same reason as the float path above: refresh the outline
-            // against the frame the window actually has now, not the one it
-            // had when it was last laid out.
-            if let conn = connections[mw.pid] {
-                Task {
-                    if let snap = await conn.snapshot(of: id) {
-                        self.windows[id]?.lastVisibleFrame = snap.frame
-                        self.syncAppState()
-                    }
-                }
+            // Native fullscreen (§6.4). Only the audit used to notice, up to
+            // 3 s later, and until it did this window still looked tiled - so
+            // the re-apply below wrote a tile frame into the middle of the
+            // fullscreen animation. The transition *is* this resize; take it
+            // here.
+            if observed.fullscreen {
+                self.enterFullscreen(id)
+                return
             }
+
+            guard let ws = self.model.workspace(containing: id) else { return }
+            if ws.isFloating(id) {
+                // Track the float's new frame as its truth.
+                ws.setFloatingFrame(id, frame: observed.frame)
+                self.windows[id]?.lastVisibleFrame = observed.frame
+                // The border is drawn from `lastVisibleFrame`, so a window
+                // that moved or resized leaves it stroked around empty
+                // desktop - which reads as a blank window sitting where the
+                // real one used to be, with the real one now unmarked.
+                self.syncAppState()
+                self.persistSoon()
+                return
+            }
+
+            if buttonDown, self.promoteToDrag(id, frame: observed.frame, placedAt: placed) {
+                return
+            }
+
+            // App moved itself: snap back to the model.
+            if id == self.model.focusedWindow {
+                // Same reason as the float path above: refresh the outline
+                // against the frame the window actually has now, not the one
+                // it had when it was last laid out.
+                self.windows[id]?.lastVisibleFrame = observed.frame
+                self.syncAppState()
+            }
+            if let home = ws.homeDisplay { self.scheduleReapply(home) }
         }
-        if let home = ws.homeDisplay { scheduleReapply(home) }
+    }
+
+    /// Title-bar drag on a tiled window: float it for the drag and offer drop
+    /// targets to re-tile (§4.3). Reports whether it took the window.
+    ///
+    /// A drag is a *move*, so the origin leaving where the layout put it is
+    /// the only evidence that counts. The cursor being inside the window is
+    /// not enough on its own: clicking a tab, a scrollbar or a sidebar
+    /// divider is a mouse-down inside the window too, and apps resize
+    /// themselves in response - a terminal re-fits its character grid on
+    /// every tab switch - so promoting on that popped the window out of the
+    /// layout, and out it stayed, for an ordinary click.
+    /// NB: dragging a tiled window's own edge is deliberately *not* turned
+    /// into a split adjustment, tempting as it looks. That gesture reaches
+    /// this file as "the size changed while the button was held" — which is
+    /// indistinguishable from an app re-fitting itself during an ordinary
+    /// click, the exact confusion that used to pop a terminal out of the
+    /// layout on every tab switch. Cursor-near-an-edge does not separate
+    /// them either, because a tab strip sits on the top edge. The gap strips
+    /// give the same capability from the other side of the split, with a hit
+    /// area that means only one thing.
+    private func promoteToDrag(_ id: WindowID, frame: CGRect, placedAt: CGRect) -> Bool {
+        // A drag moves a window; it does not resize it. Testing the origin
+        // alone is not enough: macOS anchors a resize at the bottom-left, so
+        // a window that only got shorter still reports a different top-left
+        // in the global, y-down space the engine works in — which is exactly
+        // what a terminal re-fitting its character grid on a tab switch
+        // looks like. Requiring the size to hold is what separates the two.
+        guard abs(frame.width - placedAt.width) <= 2,
+              abs(frame.height - placedAt.height) <= 2 else { return false }
+        guard abs(frame.origin.x - placedAt.origin.x) > 2
+            || abs(frame.origin.y - placedAt.origin.y) > 2 else { return false }
+        // Apps move their own windows during unrelated drags, and floating
+        // those would pop the wrong window out and let dragEnded retile it
+        // (§6.4). Only the window under the cursor can be the dragged one.
+        guard let cursor = cursorInGlobalCG(), frame.contains(cursor) else { return false }
+        guard let ws = model.workspace(containing: id), !ws.isFloating(id) else { return false }
+        _ = ws.toggleFloat(id, defaultFrame: frame)
+        ws.setFloatingFrame(id, frame: frame)
+        windows[id]?.floating = true
+        // An earlier event in this same gesture - the first pixel of the
+        // drag, below the threshold above - may have queued a re-apply. It
+        // would land mid-drag and write the window back to where the drag
+        // started.
+        if let home = ws.homeDisplay { reapplyDebounce[home]?.cancel() }
+        applyAll()
+        beginDragSession(id)
+        return true
+    }
+
+    /// Native fullscreen (§6.4): the window leaves the tree - Zephr never
+    /// fights the green button - but stays tracked so the palette can list it
+    /// and so leaving fullscreen puts it back in the workspace it came from
+    /// (§4.4). Idempotent, except that a window already flagged fullscreen
+    /// and yet somehow back in the tree is taken out again: profile restore
+    /// can re-insert one it matched.
+    private func enterFullscreen(_ id: WindowID) {
+        guard let mw = windows[id] else { return }
+        let inTree = model.workspace(containing: id)?.id
+        guard !mw.fullscreen || inTree != nil else { return }
+        if let inTree { windows[id]?.suspendedWorkspace = inTree }
+        windows[id]?.fullscreen = true
+        model.removeWindow(id)
+        applyAll()
+    }
+
+    private func exitFullscreen(_ id: WindowID) {
+        guard let mw = windows[id], mw.fullscreen else { return }
+        windows[id]?.fullscreen = false
+        windows[id]?.suspendedWorkspace = nil
+        model.insertWindow(
+            id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
+        applyAll()
     }
 
     // MARK: - Drag drop-zones (§4.3)
@@ -1147,6 +1227,7 @@ final class TilingEngine {
     func perform(_ command: Command) {
         lastActivity = ContinuousClock.now
         guard !paused || command == .togglePause else { return }
+        followFrontmostFromEmptyWorkspace()
         let interval = Self.signposter.beginInterval("command")
         defer { Self.signposter.endInterval("command", interval) }
         switch command {
@@ -1334,6 +1415,36 @@ final class TilingEngine {
         case .togglePause:
             setPaused(!paused)
         }
+    }
+
+    /// Points commands at the display the user is actually working on when
+    /// the focused one has nothing to work on.
+    ///
+    /// Every command targets `model.focusedWorkspace`, so with the laptop
+    /// focused on an empty workspace and every window on the external,
+    /// `balance`, `resize` and friends all succeed at doing nothing - no
+    /// error, no feedback, just a key that appears dead. Focus is only ever
+    /// left on an empty workspace by a deliberate switch to one, and nothing
+    /// moves it afterwards because there is no window there to focus.
+    ///
+    /// The frontmost application is the best evidence available of where the
+    /// user really is, so follow its visible managed window. Only while the
+    /// workspace is empty: a workspace with windows already has a focused one
+    /// whose display settled this, and `goToWorkspace` sets focus on purpose.
+    /// Zephr itself is excluded - it is what `goToWorkspace` activates when
+    /// it lands on an empty workspace, and during the tutorial it even owns
+    /// managed windows.
+    private func followFrontmostFromEmptyWorkspace() {
+        guard let current = model.focusedWorkspace, current.isEmpty,
+              let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              pid != pid_t(ProcessInfo.processInfo.processIdentifier) else { return }
+        guard let evidence = windows.values.first(where: {
+                  $0.pid == pid && !$0.minimized && !$0.fullscreen && isVisible($0.id)
+              }),
+              let home = model.workspace(containing: evidence.id)?.homeDisplay,
+              home != model.focusedDisplay else { return }
+        Self.log.info("focused workspace \(current.id) is empty - following \(pid) to \(home.raw)")
+        model.focusDisplay(home)
     }
 
     // MARK: - Pause (§4.3 "never fights you": presentations, games, sharing)
@@ -2265,27 +2376,16 @@ final class TilingEngine {
             }
         }
 
-        // Native fullscreen transitions (§6.4): a window entering fullscreen
-        // leaves the tree (never fight the green button); leaving fullscreen
-        // re-tiles it into the workspace it came from (§4.4).
+        // Native fullscreen transitions (§6.4). Entering is normally caught
+        // on the resize event itself; this backstops the case where AX never
+        // reported it, and owns the exit, which arrives as a resize of a
+        // window no longer in the tree.
         for (id, mw) in windows where mw.pid == pid && !mw.minimized && !result.unresponsive.contains(id) {
             guard let isFullscreen = result.fullscreen[id] else { continue }
-            if isFullscreen && !mw.fullscreen {
-                windows[id]?.suspendedWorkspace = model.workspace(containing: id)?.id
-                windows[id]?.fullscreen = true
-                model.removeWindow(id)
-                applyAll()
-            } else if !isFullscreen && mw.fullscreen {
-                windows[id]?.fullscreen = false
-                windows[id]?.suspendedWorkspace = nil
-                model.insertWindow(id, workspace: mw.suspendedWorkspace, floating: mw.floating, frame: mw.lastVisibleFrame)
-                applyAll()
-            } else if isFullscreen, model.workspace(containing: id) != nil {
-                // A fullscreen window must never sit in the tree — profile
-                // restore can re-insert one it matched (§6.4). Drop it from
-                // the model; it stays tracked for the palette.
-                model.removeWindow(id)
-                applyAll()
+            if isFullscreen {
+                enterFullscreen(id)
+            } else {
+                exitFullscreen(id)
             }
         }
 
@@ -2386,7 +2486,8 @@ final class TilingEngine {
         }
 
         // Focus border tracks the focused visible window's target frame —
-        // but only while that window's app is actually frontmost.
+        // but only while that window's app is actually frontmost, and only
+        // while an ordinary Space is what that window's display is showing.
         //
         // The overlay lives in Zephr's process at `.floating` level, which
         // is what makes it visible at all (an agent app never activates, so
@@ -2395,7 +2496,8 @@ final class TilingEngine {
         // this check it keeps drawing over whatever the user switched to.
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let f = model.focusedWindow, let mw = windows[f], isVisible(f), !mw.minimized,
-           mw.pid == frontmost {
+           mw.pid == frontmost,
+           !hasFullscreenWindow(on: model.workspace(containing: f)?.homeDisplay) {
             focusBorder?.update(frame: mw.lastVisibleFrame)
         } else {
             focusBorder?.update(frame: nil)
@@ -2427,6 +2529,32 @@ final class TilingEngine {
     }
 
     private var lastAnnouncedFocus: WindowID?
+
+    /// Whether a native-fullscreen window owns `display`'s Space.
+    ///
+    /// A fullscreen window gets a Space of its own, and the border overlay is
+    /// on every Space by construction - it has to be, since Zephr never
+    /// activates and the border must survive a Space switch. So the outline
+    /// of a window on the tiled Space *underneath* keeps drawing across the
+    /// fullscreen app: a rectangle of stray lines over an app that has no
+    /// window there at all.
+    ///
+    /// The focused window going fullscreen itself is already covered - it
+    /// leaves the tree, so `isVisible` fails. This catches the case that
+    /// never resolves on its own: a *different* window of the same frontmost
+    /// app is the fullscreen one, so the pid check passes and the focused
+    /// window really is still tiled and visible on its own Space. Per
+    /// display, because a fullscreen window on one screen says nothing about
+    /// the tiled workspace the user is still looking at on another.
+    private func hasFullscreenWindow(on display: DisplayID?) -> Bool {
+        guard let display else { return false }
+        return windows.values.contains { mw in
+            guard mw.fullscreen else { return false }
+            // Strict containment, not `displayContaining`: its fall back to
+            // the first display would blank the border on the wrong screen.
+            return displays.first { $0.frame.contains(mw.lastVisibleFrame.center) }?.id == display
+        }
+    }
 
     // MARK: - Config (§4.6)
 

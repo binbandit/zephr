@@ -6,13 +6,32 @@ import ZephrCore
 @MainActor
 final class DropZoneOverlay {
 
+    /// Pulled in from the half-tile it represents, so it reads as the space
+    /// the window will occupy rather than a slab laid over the neighbour it
+    /// is butted against.
+    private static let inset: CGFloat = 6
+    /// Matches the window corners it is previewing (see `FocusBorder`).
+    private static let cornerRadius: CGFloat = 12
+    private static let duration: TimeInterval = 0.12
+
     private let window: NSWindow
     private let view: NSView
+    private var showing = false
 
     init() {
         view = NSView()
         view.wantsLayer = true
-        view.layer?.cornerRadius = 8
+        view.layer?.cornerRadius = Self.cornerRadius
+        // macOS corners are squircles; a circular arc next to a real window
+        // reads as subtly wrong even when the radius matches.
+        view.layer?.cornerCurve = .continuous
+        view.layer?.borderWidth = 1.5
+        // Set once. These were being reassigned on every mouse-move, which
+        // is a layer property write per event for a colour that never
+        // changes.
+        view.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+        view.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).cgColor
+
         window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -21,20 +40,62 @@ final class DropZoneOverlay {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.contentView = view
+        window.alphaValue = 0
     }
 
     func update(frame: CGRect?) {
         guard let frame,
               let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.screens.first
         else {
-            window.orderOut(nil)
+            hide()
             return
         }
-        view.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.25).cgColor
-        view.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.6).cgColor
-        view.layer?.borderWidth = 2
-        window.setFrame(globalToCocoa(frame, primaryDisplayHeight: primary.frame.height), display: true)
-        window.orderFrontRegardless()
+        // Only inset when there is room; a narrow zone would invert.
+        let padded = frame.width > Self.inset * 4 && frame.height > Self.inset * 4
+            ? frame.insetBy(dx: Self.inset, dy: Self.inset)
+            : frame
+        let target = globalToCocoa(padded, primaryDisplayHeight: primary.frame.height)
+
+        guard showing else {
+            // First appearance: place it before fading in, or it slides in
+            // from wherever the previous drag left it.
+            showing = true
+            window.setFrame(target, display: false)
+            window.orderFrontRegardless()
+            animate { self.window.animator().alphaValue = 1 }
+            return
+        }
+        // Between zones: glide. Snapping from one half-tile to another was
+        // the single thing that made this feel broken rather than deliberate.
+        animate {
+            self.window.animator().setFrame(target, display: true)
+        }
+    }
+
+    private func hide() {
+        guard showing else { return }
+        showing = false
+        let window = self.window
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = Self.duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 0
+        }, completionHandler: {
+            // A drag that starts again mid-fade will have set alpha back to
+            // 1; only actually withdraw the window if the fade finished.
+            MainActor.assumeIsolated {
+                if window.alphaValue == 0 { window.orderOut(nil) }
+            }
+        })
+    }
+
+    private func animate(_ body: @escaping () -> Void) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.allowsImplicitAnimation = true
+            body()
+        }
     }
 }
 
