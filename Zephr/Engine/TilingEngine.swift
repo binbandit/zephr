@@ -510,6 +510,32 @@ final class TilingEngine {
         if !managed.isEmpty { applyAll() }
     }
 
+    /// Set whenever Zephr itself changes which workspace a display shows. The
+    /// stash writes that follow can make macOS activate an app Zephr just put
+    /// away, and following that activation would bounce the user straight back
+    /// to where they came from.
+    private var lastWorkspaceChange: ContinuousClock.Instant?
+
+    /// ⌘-Tab, the Dock and a click on a window all activate an app without
+    /// telling Zephr which workspace the user meant. If the app's focused
+    /// window lives on a workspace that is not showing, macOS still makes it
+    /// frontmost - and Zephr has that window stashed off-screen, so the user
+    /// ends up typing into an app they cannot see, with every directional
+    /// command starting from a window on another workspace.
+    ///
+    /// Follow the user and bring that workspace up, the way i3 does when focus
+    /// lands elsewhere (§4.4, and §4.2's "summoned by activating their app").
+    private func followActivation(_ id: WindowID) {
+        guard let ws = model.workspace(containing: id) else { return }  // withdrawn: nothing to show
+        guard model.focusedWorkspace?.id != ws.id else { return }
+        if let last = lastWorkspaceChange, ContinuousClock.now - last < .milliseconds(600) { return }
+        lastWorkspaceChange = .now
+        let affected = model.activateWorkspace(ws.id, on: ws.homeDisplay)
+        for display in affected { applyDisplay(display) }
+        model.noteFocused(id)
+        syncAppState()
+    }
+
     private func appActivated(pid: pid_t) {
         // Retire the focus border first: activating an app Zephr does not
         // manage (or one whose focused window it does not) still has to take
@@ -521,6 +547,7 @@ final class TilingEngine {
             guard let element = await conn.focusedWindowElement() else { return }
             if let id = await conn.id(for: element) {
                 self.noteFocused(id)
+                self.followActivation(id)
                 return
             }
             // The window the user just switched to is one we never saw
@@ -528,7 +555,10 @@ final class TilingEngine {
             // audit means up to 30 s of the focused window being unmanaged.
             // Adopting here is the cheapest recovery there is.
             await self.adopt(element: element, pid: pid)
-            if let id = await conn.id(for: element) { self.noteFocused(id) }
+            if let id = await conn.id(for: element) {
+                self.noteFocused(id)
+                self.followActivation(id)
+            }
         }
     }
 
@@ -1448,6 +1478,7 @@ final class TilingEngine {
             }
 
         case .goToWorkspace(let n):
+            lastWorkspaceChange = .now
             let affected = model.activateWorkspace(n)
             for d in affected { applyDisplay(d) }
             if let target = model.focusedWorkspace?.focusedWindow ?? model.focusedWorkspace?.fallbackFocus() {
